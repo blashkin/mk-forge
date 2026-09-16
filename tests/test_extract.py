@@ -64,3 +64,21 @@ def test_no_parameters_sheet(tmp_path):
     wb.save(empty)
     with pytest.raises(ParametersError, match="База для расчета"):
         run(empty, tmp_path)
+
+
+def test_notice_without_highway_column_is_readable(export, anon_dir, tmp_path):
+    """Уведомление без трассовой колонки: в csv ноль, а не пустая ячейка, и данные читаются."""
+    from conftest import notice_document
+
+    from mkforge.core.loaders import check, load_inputs
+
+    rows = [("0 – 5", ("0,00", "0,00", "-3,50")), ("более 5", ("0,00", "0,00", "-1,00"))]
+    notice = notice_document(tmp_path / "без трассы.docx", highway=False, rows=rows)
+    result = extract(source=export, out_dir=anon_dir, notice=notice)
+
+    inputs = load_inputs(anon_dir)
+    assert check(inputs).ok
+    assert [bracket.dt for bracket in inputs.scale.brackets] == pytest.approx([0.035, 0.01])
+    assert all(bracket.dt_highway == 0.0 for bracket in inputs.scale.brackets)
+    assert not inputs.scale.has_highway
+    assert not any("с трассовыми ставками" in note for note in result.notes)

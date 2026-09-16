@@ -173,8 +173,15 @@ def extract(source: Path, out_dir: Path, notice: Path | None = None) -> ExtractR
 
     notes: list[str] = []
     if notice is not None:
-        scale = [bracket.row() for bracket in parse_notice(notice)]
-        notes.append(f"шкала СТП взята из уведомления {notice.name}, с трассовыми ставками")
+        brackets = parse_notice(notice)
+        scale = [bracket.row() for bracket in brackets]
+        if any("дт_трасса" in bracket.rates for bracket in brackets):
+            notes.append(f"шкала СТП взята из уведомления {notice.name}, с трассовыми ставками")
+        else:
+            notes.append(
+                f"шкала СТП взята из уведомления {notice.name}: трассовой колонки в нем нет, "
+                "трассовые ставки нулевые"
+            )
     else:
         notes.append(
             "шкала СТП взята из книги: трассовые ставки недоступны, "

@@ -51,12 +51,16 @@ class NoticeBracket:
     rates: dict[str, float]
 
     def row(self) -> dict[str, object]:
-        """Строка для stp_scale.csv."""
+        """Строка для stp_scale.csv.
+
+        Продукт, колонки которого в уведомлении нет, получает ноль, а не пустую ячейку:
+        пустую загрузчик не примет. Так же и шкала из книги пишет трассе ноль.
+        """
         return {
             "сегмент": self.label,
             "мин_тыс_л": self.low,
             "макс_тыс_л": self.high,
-            **self.rates,
+            **{name: self.rates.get(name, 0.0) for name, _ in PRODUCT_HEADERS},
         }
 
 

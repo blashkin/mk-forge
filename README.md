@@ -165,6 +165,7 @@ uv run mk-forge validate "out/рабочие/<книга>.xlsx" \
     --config configs/<акция>.yaml                          # пересчитать и сверить с ядром
 uv run mk-forge restore "out/рабочие/<книга>.xlsx"         # вернуть настоящие номера
 uv run mk-forge page configs/<акция>.yaml                  # страница на http://127.0.0.1:8765
+uv run mk-forge guide                                      # гайд «Установка на Mac» одним html в out/, для пересылки
 ```
 
 Пути считаются от корня данных, а не от текущей папки. Корень — переменная

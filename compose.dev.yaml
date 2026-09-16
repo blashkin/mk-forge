@@ -1,0 +1,24 @@
+# Проверить, что получат другие: образ из рабочего дерева, папка проекта томом.
+#
+#   MK_FORGE_CONFIG=configs/<акция>.yaml docker compose -f compose.dev.yaml up --build
+#   docker compose -f compose.dev.yaml down
+#
+# Корень данных — папка проекта: страница пишет параметры в ее конфиг, кладет книги
+# в ее out/ и берет ключ из ее .env. Перезапуска нет: иначе контейнер держал бы порт,
+# пока страница запущена из исходников.
+name: mk-forge-dev
+
+services:
+  page:
+    build:
+      context: .
+      target: runtime
+    image: mk-forge:dev
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - .:/srv/mk-forge
+    environment:
+      # Конфиг по умолчанию не подставляется: страница пишет в него поля формы,
+      # и молча открытый образец правился бы вместо своей акции.
+      MK_FORGE_CONFIG: ${MK_FORGE_CONFIG:-}

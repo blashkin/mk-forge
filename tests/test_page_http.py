@@ -11,11 +11,12 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
-from mkforge.page.server import PageHandler, PageServer, free_port
-from mkforge.task.calculate import open_workspace
+from mkforge.page.server import PageHandler, PageServer, free_port, serve
+from mkforge.task.calculate import Waiting, open_workspace
 
 
 @pytest.fixture
@@ -27,7 +28,20 @@ def address(anon_dir: Path, distributed_config_path: Path, tmp_path: Path):
         work_dir=tmp_path / "рабочие",
         out_dir=tmp_path / "готовые",
     )
-    server = PageServer(("127.0.0.1", free_port()), PageHandler, state)
+    yield from running(PageServer(("127.0.0.1", free_port()), PageHandler, state))
+
+
+@pytest.fixture
+def waiting(distributed_config_path: Path, tmp_path: Path):
+    """Страница на пустом корне: данных нет, конфиг есть."""
+    state = Waiting(inputs_dir=tmp_path / "пусто", config_path=distributed_config_path,
+                    missing=("transactions.csv",))
+    yield from running(
+        PageServer(("127.0.0.1", free_port()), PageHandler, state, tmp_path / "готовые")
+    )
+
+
+def running(server: PageServer):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -209,3 +223,91 @@ def test_route_failure_is_logged_without_data(address, monkeypatch, capsys):
     # Сервер жив и отвечает дальше.
     status, _, _ = get(address, "/")
     assert status == 200
+
+
+def test_health(address, waiting):
+    """Жив ли сервер — и только: пустой том не делает контейнер больным."""
+    for where in (address, waiting):
+        status, body, _ = get(where, "/api/health")
+        assert status == 200 and json.loads(body) == {"ok": True}
+
+
+# --- без данных ------------------------------------------------------------
+
+
+def test_page_without_data_invites_to_upload(waiting):
+    status, body, _ = get(waiting, "/")
+    assert status == 200
+    status, body, _ = get(waiting, "/api/state")
+    payload = json.loads(body)
+    assert payload["ready"] is False
+    assert payload["waiting"]["missing"] == ["transactions.csv"]
+
+
+@pytest.mark.parametrize("path", ["/api/calculate", "/api/book", "/api/config/preview",
+                                  "/api/config/save"])
+def test_nothing_is_calculated_without_data(waiting, path):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        post(waiting, path, {"overrides": {}})
+    assert error.value.code == 409
+    assert "загрузите выгрузку" in json.loads(error.value.read())["message"]
+
+
+# --- готовые книги ---------------------------------------------------------
+
+BOOK = "Пример акции; «разные» скидки.xlsx"
+
+
+@pytest.fixture
+def ready(tmp_path: Path) -> Path:
+    """Папка готовых: одна готовая книга и все, чего в списке быть не должно."""
+    out = tmp_path / "готовые"
+    (out / "рабочие").mkdir(parents=True)
+    (out / ".mk-forge-недосчитанная").mkdir()
+    (out / BOOK).write_bytes(b"PK-kniga")
+    (out / "рабочие" / "На псевдонимах.xlsx").write_bytes(b"PK-rabochaya")
+    (out / ".mk-forge-недосчитанная" / BOOK).write_bytes(b"PK-nedo")
+    (out / f"~${BOOK}").write_bytes(b"zamok")
+    (out / "заметка.txt").write_text("не книга", encoding="utf-8")
+    return out
+
+
+def test_only_ready_books_are_listed(address, ready):
+    status, body, _ = get(address, "/api/books")
+    assert status == 200
+    assert [book["name"] for book in json.loads(body)["books"]] == [BOOK]
+
+
+def test_book_downloads_with_its_cyrillic_name(address, waiting, ready):
+    """Кириллица в заголовке как есть не проходит: имя идет кодированным."""
+    for where in (address, waiting):
+        status, body, headers = get(where, "/api/books/" + quote(BOOK))
+        assert status == 200 and body == b"PK-kniga"
+        assert "spreadsheetml" in headers["Content-Type"]
+        disposition = headers["Content-Disposition"]
+        assert disposition.startswith("attachment;")
+        assert f"filename*=UTF-8''{quote(BOOK, safe='')}" in disposition
+        assert 'filename="book.xlsx"' in disposition
+
+
+@pytest.mark.parametrize("name", [
+    "рабочие/На псевдонимах.xlsx",
+    ".mk-forge-недосчитанная/" + BOOK,
+    "../готовые/" + BOOK,
+    "~$" + BOOK,
+    "заметка.txt",
+    "нет такой.xlsx",
+])
+def test_nothing_but_a_ready_book_downloads(address, ready, name):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        get(address, "/api/books/" + quote(name, safe=""))
+    assert error.value.code == 404
+
+
+def test_second_page_on_the_same_port_is_refused(waiting, tmp_path, capsys):
+    """Порт один: блуждающий порт рождает две страницы с разными числами."""
+    port = int(waiting.rsplit(":", 1)[1])
+    state = Waiting(inputs_dir=tmp_path, config_path=tmp_path / "акция.yaml")
+    assert serve(state, out_dir=tmp_path, port=port, open_browser=False) == 1
+    assert f"порт {port} занят" in capsys.readouterr().err
+

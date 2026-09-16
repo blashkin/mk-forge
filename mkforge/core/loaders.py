@@ -31,6 +31,10 @@ SCALE_FILE = "stp_scale.csv"
 ECONOMICS_FILE = "product_economics.csv"
 MARGIN_FILE = "margin_forecast.csv"
 BRANCHES_FILE = "branch_regions.csv"
+# Все, без чего расчет не идет. Таблицу отделений prepare не создает, но и без нее не посчитать.
+INPUT_FILES = (
+    TRANSACTIONS_FILE, CONTRACTS_FILE, SCALE_FILE, ECONOMICS_FILE, MARGIN_FILE, BRANCHES_FILE,
+)
 
 # Метка показателя в таблице экономики -> поле модели.
 ECONOMICS_FIELDS = {

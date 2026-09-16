@@ -1,9 +1,15 @@
 """Локальный сервер страницы.
 
-Слушает только петлю. Это не перестраховка: на странице лежат числа по реальному
-пулу клиентов, и открывать их в сеть нельзя даже на минуту. По той же причине
-в разметке нет ни одной внешней ссылки — ни шрифтов, ни библиотек графиков:
-любой запрос к чужому серверу сообщил бы ему, что страница открыта.
+На странице лежат числа по реальному пулу клиентов, и открывать их в сеть нельзя
+даже на минуту. Из исходников сервер слушает только петлю. В контейнере он слушает
+все адреса контейнера, иначе проброс порта до него не достанет, и от сети его
+закрывает только проброс на петлю хоста — `127.0.0.1:8765:8765` в compose, под тестом.
+Проверка `Host` здесь защищает от чужого сайта в браузере, но не от запроса
+с подставленным заголовком. По той же причине в разметке нет ни одной внешней
+ссылки — ни шрифтов, ни библиотек графиков: любой запрос к чужому серверу сообщил
+бы ему, что страница открыта.
+
+Порт один, без перебора: блуждающий порт рождает две страницы с разными числами.
 
 Сервер многопоточный, потому что сборка книги идет минутами: пересчет в
 LibreOffice заложен с запасом в десять минут, и однопоточный сервер все это
@@ -12,23 +18,27 @@ LibreOffice заложен с запасом в десять минут, и од
 
 from __future__ import annotations
 
+import errno
 import json
+import signal
 import socket
-import traceback
+import sys
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from mkforge.config import ConfigError
 from mkforge.config_edit import EditError
 
-from mkforge.task.calculate import Workspace, calculate, form
+from mkforge.task.books import Book, find_book, ready_books
+from mkforge.task.calculate import Waiting, Workspace, calculate, form
 from mkforge.task.deliver import deliver
 from mkforge.task.jobs import Busy, Jobs
 from mkforge.task.persist import preview, save
+from mkforge.trace import log, where
 
 BODY_LIMIT = 256 * 1024
 # Сколько лишнего готовы вычитать, прежде чем отказать: столько же на всякий
@@ -40,19 +50,31 @@ STATIC = {
     "charts.js": "text/javascript; charset=utf-8",
 }
 PAGE = "index.html"
-PORT_ATTEMPTS = 10
+PORT = 8765
+LOOPBACK = "127.0.0.1"
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+NO_DATA = "данных для расчета нет — сначала загрузите выгрузку"
 
 
 class PageServer(ThreadingHTTPServer):
-    """Сервер, который держит открытое задание."""
+    """Сервер, который держит открытое задание — или ждет данных для него."""
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, state: Workspace):
+    def __init__(self, address, handler, state: Workspace | Waiting, out_dir: Path | None = None):
+        if isinstance(state, Workspace):
+            out_dir = out_dir or state.out_dir
+        if out_dir is None:
+            raise ValueError("без данных серверу нужно знать папку готовых книг")
         super().__init__(address, handler)
         self.state = state
+        self.out_dir = out_dir
         self.jobs = Jobs()
+
+    @property
+    def ready(self) -> bool:
+        return isinstance(self.state, Workspace)
 
 
 def _static(name: str) -> bytes:
@@ -72,11 +94,13 @@ class PageHandler(BaseHTTPRequestHandler):
     # --- транспорт ------------------------------------------------------
 
     def _send(self, status: HTTPStatus, body: bytes, content_type: str,
-              cache: str = "no-store") -> None:
+              cache: str = "no-store", headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         if status >= HTTPStatus.BAD_REQUEST:
             # Отказ мог случиться до того, как тело дочитано. Оставить такое
             # соединение открытым значит получить на нем мусор вместо запроса.
@@ -134,8 +158,12 @@ class PageHandler(BaseHTTPRequestHandler):
         return True
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 — имя из базового класса
-        """Одна строка на запрос, без тел: в телах числа по реальному пулу."""
-        print(f"  {self.command} {self.path}")
+        """Одна строка на запрос, без тел: в телах числа по реальному пулу.
+
+        Проверку здоровья Docker шлет каждые полминуты, в журнале она только шум.
+        """
+        if urlparse(self.path).path != "/api/health":
+            print(f"  {self.command} {self.path}")
 
     def _guarded(self, route) -> None:
         """Сбой маршрута — строка в стандартный вывод и внятный отказ странице.
@@ -150,10 +178,7 @@ class PageHandler(BaseHTTPRequestHandler):
         except ConnectionError:
             self.close_connection = True  # страница ушла, отвечать некому
         except Exception as error:  # noqa: BLE001 — журналу нужен любой сбой
-            print(
-                f"  сбой {self.command} {urlparse(self.path).path}: {_where(error)}",
-                flush=True,
-            )
+            log(f"сбой {self.command} {urlparse(self.path).path}: {where(error)}")
             try:
                 self._fail(HTTPStatus.INTERNAL_SERVER_ERROR,
                            "на сервере сбой, подробности в журнале")
@@ -185,9 +210,26 @@ class PageHandler(BaseHTTPRequestHandler):
                 return
             self._send(HTTPStatus.OK, _static(name), content_type, "no-cache")
             return
+        if path == "/api/health":
+            # Жив ли сервер, и только. От данных не зависит: пустой том — не болезнь.
+            self._json({"ok": True})
+            return
         if path == "/api/state":
             state = self.server.state
-            self._json({"form": form(state), "answer": calculate(state)})
+            if not self.server.ready:
+                self._json({"ready": False, "waiting": state.payload()})
+                return
+            self._json({"ready": True, "form": form(state), "answer": calculate(state)})
+            return
+        if path == "/api/books":
+            self._json({"books": [book.payload() for book in ready_books(self.server.out_dir)]})
+            return
+        if path.startswith("/api/books/"):
+            book = find_book(self.server.out_dir, unquote(path[len("/api/books/"):]))
+            if book is None:
+                self._fail(HTTPStatus.NOT_FOUND, "такой готовой книги нет")
+                return
+            self._book(book)
             return
         if path.startswith("/api/book/"):
             job = self.server.jobs.get(path[len("/api/book/"):])
@@ -206,6 +248,9 @@ class PageHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self._body()
         if body is None:
+            return
+        if not self.server.ready:
+            self._fail(HTTPStatus.CONFLICT, NO_DATA)
             return
 
         if path == "/api/calculate":
@@ -248,54 +293,88 @@ class PageHandler(BaseHTTPRequestHandler):
 
         self._fail(HTTPStatus.NOT_FOUND, "нет такого маршрута")
 
-
-def _where(error: BaseException) -> str:
-    """Тип ошибки и путь по коду, без сообщения: в сообщениях бывают данные."""
-    frames = " → ".join(
-        f"{Path(frame.filename).name}:{frame.lineno}"
-        for frame in traceback.extract_tb(error.__traceback__)
-    )
-    return f"{type(error).__name__} ({frames})"
-
-
-def _bind(state: Workspace, port: int) -> PageServer:
-    """Занять порт, при занятости попробовать следующие."""
-    last: OSError | None = None
-    for candidate in range(port, port + PORT_ATTEMPTS):
-        try:
-            return PageServer(("127.0.0.1", candidate), PageHandler, state)
-        except OSError as error:
-            last = error
-    raise OSError(f"порты с {port} по {port + PORT_ATTEMPTS - 1} заняты") from last
+    def _book(self, book: Book) -> None:
+        self._send(
+            HTTPStatus.OK,
+            book.path.read_bytes(),
+            XLSX,
+            headers={"Content-Disposition": attachment(book.name)},
+        )
 
 
-def serve(state: Workspace, port: int = 8765, open_browser: bool = True) -> int:
+def attachment(name: str) -> str:
+    """Заголовок скачивания с именем книги.
+
+    Имя кириллицей в заголовок как есть не пройдет: http.server пишет заголовки
+    в latin-1. Поэтому оно идет кодированным (RFC 6266), а рядом — запасное
+    латиницей для клиентов, которые кодированное не читают.
+    """
+    plain = name.isascii() and not any(mark in name for mark in '"\\;')
+    fallback = name if plain else f"book{Path(name).suffix}"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def serve(
+    state: Workspace | Waiting,
+    out_dir: Path,
+    host: str = LOOPBACK,
+    port: int = PORT,
+    open_browser: bool = True,
+) -> int:
     """Поднять страницу. Возвращает код для командной строки."""
     from mkforge.task.calculate import soffice_found
 
-    server = _bind(state, port)
-    address = f"http://127.0.0.1:{server.server_address[1]}"
-    plan = calculate(state)
-    pool = plan["plan"]["pool_size"] if plan["ok"] else 0
-    forecast = plan["plan"]["forecast_size"] if plan["ok"] else 0
+    try:
+        server = PageServer((host, port), PageHandler, state, out_dir)
+    except OSError as error:
+        if error.errno == errno.EADDRINUSE:
+            print(
+                f"порт {port} занят: страница, похоже, уже открыта — "
+                f"в контейнере или из исходников. Вторую не поднимаю",
+                file=sys.stderr,
+            )
+        else:
+            print(f"не занять {host}:{port}: {error.strerror or error}", file=sys.stderr)
+        return 1
 
+    # Все адреса контейнера — это не адрес для браузера: снаружи страница на петле.
+    address = f"http://{LOOPBACK if host in ('0.0.0.0', '::', '') else host}:{port}"
     print(f"страница «Акция»: {address}")
-    print(f"конфиг: {state.config_path}")
-    print(f"данные: {state.inputs_dir}, договоров в пуле {pool}, прогноз новых {forecast}")
-    print(f"книги: рабочие в {state.work_dir}, готовые в {state.out_dir}")
+    if host != LOOPBACK:
+        print(f"слушаю {host}:{port}; от сети закрывает только проброс порта на петлю")
+    if isinstance(state, Workspace):
+        plan = calculate(state)
+        pool = plan["plan"]["pool_size"] if plan["ok"] else 0
+        forecast = plan["plan"]["forecast_size"] if plan["ok"] else 0
+        print(f"конфиг: {state.config_path}")
+        print(f"данные: {state.inputs_dir}, договоров в пуле {pool}, прогноз новых {forecast}")
+        print(f"книги: рабочие в {state.work_dir}, готовые в {state.out_dir}")
+    else:
+        print(f"конфиг: {state.config_path}")
+        if state.missing:
+            print(f"данных нет: в {state.inputs_dir} не хватает {', '.join(state.missing)}")
+        else:
+            # Что именно не так, видно на странице: в описании бывают числа пула.
+            print(f"данные в {state.inputs_dir} не годятся — что не так, видно на странице")
+        print("страница открыта с приглашением загрузить выгрузку")
     print(
         "LibreOffice найден — сборка книги с пересчетом доступна"
         if soffice_found()
         else "LibreOffice не найден — числа считаются, книгу пересчитать будет нечем"
     )
-    print("Ctrl+C — остановить")
+    print("Ctrl+C — остановить", flush=True)
 
     if open_browser:
         webbrowser.open(address)
+    # Сигнал остановки идет тем же путем, что Ctrl+C: страница гаснет сразу, а прерванная
+    # сборка оставляет строку в журнале. Без обработчика Python первым процессом контейнера
+    # сигнал не слышал бы вовсе, и Docker убивал бы его через десять секунд.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nстраница остановлена")
+        server.jobs.interrupt()
+        print("\nстраница остановлена", flush=True)
     finally:
         server.server_close()
     return 0

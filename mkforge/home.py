@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,9 @@ HOME_ENV_VAR = "MK_FORGE_HOME"
 PROJECT_NAME = "mk-forge"
 MAPPING_FILE = Path("data") / "contracts.mapping.json"
 CODE_DIR = Path(__file__).resolve().parent
+# Образцы конфигов лежат рядом с кодом: в папке проекта и в образе.
+SAMPLES_DIR = CODE_DIR.parent / "configs"
+SAMPLE_PATTERN = "example_*.yaml"
 
 
 class HomeError(Exception):
@@ -108,3 +112,22 @@ def _from_project(code_dir: Path) -> Home:
         f"{HOME_ENV_VAR} не задана, а над кодом ({code_dir}) нет pyproject.toml "
         f"проекта; задай корень данных в {HOME_ENV_VAR}"
     )
+
+
+def seed_configs(home: Home, samples: Path = SAMPLES_DIR) -> list[Path]:
+    """Положить образцы конфигов в корень, где нет ни одного конфига.
+
+    В образе корень — том, а образцы лежат рядом с кодом. Копируются они один раз,
+    при первом старте, дальше конфиги правит страница: копируй их при каждом старте,
+    обновление образа стирало бы параметры. Берутся только образцы: в папке проекта
+    рядом с ними лежат настоящие конфиги.
+    """
+    if any(home.configs.glob("*.yaml")) or not samples.is_dir():
+        return []
+    home.configs.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for sample in sorted(samples.glob(SAMPLE_PATTERN)):
+        target = home.configs / sample.name
+        shutil.copyfile(sample, target)
+        copied.append(target)
+    return copied

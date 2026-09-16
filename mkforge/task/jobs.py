@@ -6,6 +6,9 @@
 
 Прогресс отдается шагами, а не процентами: сколько займет пересчет, мы не знаем,
 и рисовать полоску, которая врет, незачем.
+
+Упавшая и прерванная сборка пишут строку в журнал: страница, которая ее видела,
+могла быть уже закрыта, а в контейнере журнал — единственное, что остается.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable
+
+from mkforge.trace import log, where
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,18 @@ class Jobs:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def interrupt(self) -> Job | None:
+        """Страница останавливается посреди сборки — сказать об этом в журнал.
+
+        Поток сборки фоновый и уходит вместе с процессом. Недособранная книга
+        в готовые не попадает: туда она переносится одним переименованием.
+        """
+        job = self.running()
+        if job is None or job.state != "running":
+            return None
+        log(f"сборка {job.id} прервана: страница остановлена")
+        return job
+
     def start(self, run: Callable[[Callable[[Step], None]], dict]) -> Job:
         """Запустить задание в отдельном потоке.
 
@@ -103,6 +120,8 @@ class Jobs:
             try:
                 result = run(report)
             except Exception as error:  # noqa: BLE001 — сообщаем все, чем бы ни было
+                # До смены состояния: кто ждет конца задания, застанет строку в журнале.
+                log(f"сборка {job.id} упала: {where(error)}")
                 with self._lock:
                     job.state = "failed"
                     job.error = str(error) or error.__class__.__name__

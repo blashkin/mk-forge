@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -69,6 +70,34 @@ def test_failed_job_keeps_the_message():
     assert job.state == "failed"
     assert job.error == "не получилось"
     assert job.steps[0].state == "failed", "шаг, на котором упало, не остается идущим"
+
+
+def test_failed_job_is_logged_without_the_message(capsys):
+    """Страница, видевшая сбой, могла закрыться: строка остается в журнале.
+    Сообщение в нее не идет — в сообщениях бывают псевдонимы и числа пула."""
+    jobs = Jobs()
+
+    def work(report):
+        raise ValueError("Д-ABCDEF0123 выручка 98765432")
+
+    job = wait(jobs, jobs.start(work).id, limit=5)
+    output = capsys.readouterr().out
+    assert f"сборка {job.id} упала: ValueError" in output
+    assert "test_task_deliver.py" in output, "видно, где случилось"
+    assert "Д-ABCDEF0123" not in output and "98765432" not in output
+
+
+def test_interrupted_job_is_logged(capsys):
+    jobs = Jobs()
+    release = threading.Event()
+    job = jobs.start(lambda report: release.wait(5) and {"ok": True})
+    try:
+        assert jobs.interrupt() is job
+        assert f"сборка {job.id} прервана" in capsys.readouterr().out
+    finally:
+        release.set()
+    wait(jobs, job.id, limit=5)
+    assert jobs.interrupt() is None, "кончившаяся сборка прерванной не считается"
 
 
 def test_only_one_job_at_a_time():

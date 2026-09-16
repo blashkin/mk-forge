@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -16,10 +17,12 @@ from mkforge.config import ConfigError, load_config
 from mkforge.core.validate import RecalculationError, validate_path
 from mkforge.core.verify import verify_all
 from mkforge.doctor import diagnose
-from mkforge.home import Home, HomeError, find_home
+from mkforge.home import Home, HomeError, find_home, seed_configs
 from mkforge.renderers.xlsx import build
 from mkforge.restore import deliverable_path, restore_numbers
 
+
+CONFIG_ENV_VAR = "MK_FORGE_CONFIG"
 
 ROOT_NOTE = (
     "Относительные пути считаются от корня данных: переменная MK_FORGE_HOME, "
@@ -105,24 +108,32 @@ def _cmd_restore(args: argparse.Namespace, home: Home) -> int:
 
 
 def _cmd_page(args: argparse.Namespace, home: Home) -> int:
-    """Поднять локальную страницу акции."""
+    """Поднять страницу акции. Без данных она открывается с приглашением загрузить выгрузку."""
     from mkforge.page.server import serve
-    from mkforge.task.calculate import open_workspace
+    from mkforge.task.calculate import open_page
 
-    inputs_dir = _path(home, args.inputs, home.inputs)
-    inputs = load_inputs(inputs_dir)
-    report = check(inputs)
-    if not report.ok:
-        print(report.report(), file=sys.stderr)
+    # В контейнере аргументов не передают, акцию задает переменная. Пустая
+    # переменная — не задана: конфиг по умолчанию не подставляется и здесь.
+    config = args.config or os.environ.get(CONFIG_ENV_VAR, "").strip()
+    if not config:
+        print(
+            f"конфиг акции не задан: укажи его аргументом или в {CONFIG_ENV_VAR}",
+            file=sys.stderr,
+        )
         return 1
-    state = open_workspace(
-        inputs_dir=inputs_dir,
-        config_path=home.resolve(args.config),
+    for sample in seed_configs(home):
+        print(f"в корне не было конфигов, положен образец {sample.name}")
+    state = open_page(
+        inputs_dir=_path(home, args.inputs, home.inputs),
+        config_path=home.resolve(Path(config)),
         mapping_path=_path(home, args.mapping, home.mapping),
         work_dir=_path(home, args.work, home.work),
         out_dir=home.out,
     )
-    return serve(state, port=args.port, open_browser=not args.no_open)
+    return serve(
+        state, out_dir=home.out, host=args.host, port=args.port,
+        open_browser=not args.no_open,
+    )
 
 
 def _cmd_doctor(args: argparse.Namespace, home: Home) -> int:
@@ -242,12 +253,17 @@ def main(argv: list[str] | None = None) -> int:
     # Конфиг по умолчанию не подставляется: страница пишет в него поля формы,
     # и молча открытый пример из репозитория правился бы вместо своей акции.
     page.add_argument(
-        "config", type=Path, help="конфиг акции с распределением глубины скидки"
+        "config", type=Path, nargs="?", default=None,
+        help=f"конфиг акции с распределением глубины скидки; без аргумента — из {CONFIG_ENV_VAR}",
     )
     page.add_argument(
         "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
-    page.add_argument("--port", type=int, default=8765, help="порт на 127.0.0.1")
+    page.add_argument(
+        "--host", default="127.0.0.1",
+        help="адрес, который слушать; в контейнере 0.0.0.0, из исходников — только петля",
+    )
+    page.add_argument("--port", type=int, default=8765, help="порт, один и тот же всегда")
     page.add_argument(
         "--work", type=Path, default=None,
         help="куда собирать книги (по умолчанию out/рабочие)"

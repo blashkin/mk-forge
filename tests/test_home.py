@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mkforge.home import HOME_ENV_VAR, Home, HomeError, find_home
+from mkforge.home import HOME_ENV_VAR, Home, HomeError, find_home, seed_configs
 
 OUR_PROJECT = '[project]\nname = "mk-forge"\n'
 
@@ -93,3 +93,36 @@ def test_paths_count_from_the_root(tmp_path: Path):
     assert home.inputs == tmp_path / "data" / "anon"
     assert home.mapping == tmp_path / "data" / "contracts.mapping.json"
     assert home.work == tmp_path / "out" / "рабочие"
+
+
+# --- образцы конфигов в пустом корне ------------------------------------
+
+
+@pytest.fixture
+def samples(tmp_path: Path) -> Path:
+    folder = tmp_path / "образцы"
+    folder.mkdir()
+    (folder / "example_levels.yaml").write_text("образец: 1\n", encoding="utf-8")
+    (folder / "настоящая_акция.yaml").write_text("настоящий: 1\n", encoding="utf-8")
+    return folder
+
+
+def test_samples_go_into_an_empty_root(tmp_path: Path, samples: Path):
+    """Только образцы: рядом с ними в папке проекта лежат настоящие конфиги."""
+    root = tmp_path / "том"
+    root.mkdir()
+    copied = seed_configs(Home(root=root, source="тест"), samples)
+    assert [path.name for path in copied] == ["example_levels.yaml"]
+    assert sorted(p.name for p in (root / "configs").iterdir()) == ["example_levels.yaml"]
+
+
+def test_samples_never_overwrite_what_the_page_edited(tmp_path: Path, samples: Path):
+    """Обновление образа не должно стирать параметры: копия — один раз."""
+    root = tmp_path / "том"
+    home = Home(root=root, source="тест")
+    (root / "configs").mkdir(parents=True)
+    edited = root / "configs" / "example_levels.yaml"
+    edited.write_text("правлено страницей: 2\n", encoding="utf-8")
+
+    assert seed_configs(home, samples) == []
+    assert edited.read_text(encoding="utf-8") == "правлено страницей: 2\n"

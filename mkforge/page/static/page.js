@@ -507,12 +507,18 @@ function showDelivery(box, said, result) {
     : 'книга собрана, но не сошлась — отдавать нельзя';
 
   const done = element('div', { class: 'done' });
-  const where = result.deliverable || result.book;
-  done.appendChild(element('p', { class: 'said', text: 'файл: ' + where.path }));
   if (result.deliverable) {
+    // В том руками не ходят: книга уходит только скачиванием.
+    const line = element('p', { class: 'said' });
+    line.appendChild(bookLink(result.deliverable.name, 'скачать книгу'));
+    done.appendChild(line);
     done.appendChild(element('p', {
       class: 'said',
       text: 'настоящих номеров договоров подставлено: ' + result.deliverable.contracts,
+    }));
+  } else {
+    done.appendChild(element('p', {
+      class: 'said', text: 'в готовые книги не попала: ' + result.book.name,
     }));
   }
 
@@ -528,6 +534,71 @@ function showDelivery(box, said, result) {
   });
   done.appendChild(copy);
   box.appendChild(done);
+  showBooks();
+}
+
+/* --- готовые книги ----------------------------------------------------- */
+
+function bookLink(name, text) {
+  return element('a', {
+    href: '/api/books/' + encodeURIComponent(name), download: name, text: text || name,
+  });
+}
+
+function showBooks() {
+  fetch('/api/books')
+    .then((response) => response.json())
+    .then((answer) => {
+      const box = document.getElementById('books');
+      box.textContent = '';
+      box.appendChild(element('h2', { text: 'Готовые книги' }));
+      if (!answer.books.length) {
+        box.appendChild(element('p', {
+          class: 'said', text: 'пока нет: книга появится здесь, когда сборка сойдется',
+        }));
+        return;
+      }
+      const list = element('ul');
+      answer.books.forEach((book) => {
+        const item = element('li');
+        item.appendChild(bookLink(book.name));
+        item.appendChild(element('small', {
+          class: 'hint',
+          text: new Date(book.modified * 1000).toLocaleString('ru-RU')
+            + ' · ' + money.format(Math.max(1, Math.round(book.size / 1024))) + ' КБ',
+        }));
+        list.appendChild(item);
+      });
+      box.appendChild(list);
+    });
+}
+
+/* --- без данных -------------------------------------------------------- */
+
+function showWaiting(waiting) {
+  document.getElementById('title').textContent = 'Акция';
+  document.getElementById('source').textContent =
+    'конфиг ' + waiting.config_path + ' · данные ' + waiting.inputs_dir;
+  document.getElementById('actions').hidden = true;
+
+  const form = document.getElementById('form');
+  form.textContent = '';
+  const box = element('div', { class: 'invite' });
+  box.appendChild(element('h2', { text: 'Загрузите выгрузку' }));
+  box.appendChild(element('p', {
+    text: 'Считать пока не по чему. Нужны выгрузка транзакций и договоров, '
+      + 'уведомление о СТП и таблица отделений.',
+  }));
+  const list = (title, items, tone) => {
+    if (!items.length) return;
+    box.appendChild(element('p', { class: tone || '', text: title }));
+    const ul = element('ul');
+    items.forEach((item) => ul.appendChild(element('li', { class: tone || '', text: item })));
+    box.appendChild(ul);
+  };
+  list('Не хватает файлов:', waiting.missing);
+  list('Данные есть, но не годятся:', waiting.problems, 'broken');
+  form.appendChild(box);
 }
 
 /* --- запуск ------------------------------------------------------------ */
@@ -536,6 +607,12 @@ function start() {
   fetch('/api/state')
     .then((response) => response.json())
     .then((payload) => {
+      showBooks();
+      if (!payload.ready) {
+        showWaiting(payload.waiting);
+        return;
+      }
+      document.getElementById('actions').hidden = false;
       const described = payload.form;
       state.fields = described.fields;
       state.sections = described.sections;

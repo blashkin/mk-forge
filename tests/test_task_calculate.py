@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mkforge.task.calculate import calculate, form, open_workspace
+from mkforge.task.calculate import Waiting, Workspace, calculate, form, open_page, open_workspace
 
 
 @pytest.fixture
@@ -103,3 +103,44 @@ def test_config_without_a_distribution_says_so(anon_dir: Path, config_path: Path
     assert answer["ok"] is False
     assert answer["errors"][0]["field"] == "distribution"
     assert "распределение" in answer["errors"][0]["message"]
+
+
+# --- открытие страницы: без данных не отказ, а приглашение ---------------
+
+
+def opened(inputs_dir: Path, config: Path, tmp_path: Path):
+    return open_page(
+        inputs_dir=inputs_dir,
+        config_path=config,
+        mapping_path=tmp_path / "mapping.json",
+        work_dir=tmp_path / "рабочие",
+        out_dir=tmp_path / "готовые",
+    )
+
+
+def test_page_opens_with_data(anon_dir, distributed_config_path, tmp_path):
+    assert isinstance(opened(anon_dir, distributed_config_path, tmp_path), Workspace)
+
+
+def test_page_without_data_names_what_is_missing(distributed_config_path, tmp_path):
+    """Пустой том: в контейнере с перезапуском отказ крутил бы процесс по кругу."""
+    state = opened(tmp_path / "пусто", distributed_config_path, tmp_path)
+    assert isinstance(state, Waiting)
+    assert "transactions.csv" in state.missing and "branch_regions.csv" in state.missing
+    assert state.payload()["missing"] == list(state.missing)
+
+
+def test_page_with_broken_data_says_what_is_wrong(anon_dir, distributed_config_path, tmp_path):
+    contracts = anon_dir / "contracts.csv"
+    lines = contracts.read_text(encoding="utf-8").splitlines()
+    contracts.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")  # договор без пула
+
+    state = opened(anon_dir, distributed_config_path, tmp_path)
+    assert isinstance(state, Waiting)
+    assert not state.missing
+    assert any("нет в пуле" in problem for problem in state.problems)
+
+    (anon_dir / "stp_scale.csv").write_text("не,та,шапка\n1,2,3\n", encoding="utf-8")
+    state = opened(anon_dir, distributed_config_path, tmp_path)
+    assert isinstance(state, Waiting) and state.problems
+

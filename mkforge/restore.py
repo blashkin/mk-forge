@@ -19,7 +19,7 @@ SUMIFS сопоставляет колонку договоров транзак
 from __future__ import annotations
 
 import json
-import shutil
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,14 +95,32 @@ def load_mapping(path: Path) -> dict[str, str]:
 def restore_numbers(
     book: Path, mapping_path: Path, out: Path, recalculate: bool = True
 ) -> RestoreResult:
-    """Заменить псевдонимы на настоящие номера и сохранить книгу рядом.
+    """Заменить псевдонимы на настоящие номера и положить готовую книгу в `out`.
 
     По умолчанию книга после подмены пересчитывается: openpyxl при записи теряет
     посчитанные значения, и без пересчета получится файл, который Excel откроет
     правильно, а любой предпросмотр покажет пустым. Если LibreOffice не найден,
     шаг пропускается, и об этом говорится в отчете.
+
+    Подмена и пересчет идут во временной папке рядом с целью, а на место книга
+    ложится одним переименованием. Иначе прерванная сборка оставила бы в готовых
+    недосчитанную книгу, и страница предложила бы ее скачать. Папка рядом, а не
+    системная временная: переименование атомарно только в пределах одного диска,
+    а в контейнере том и /tmp — разные.
     """
     mapping = load_mapping(mapping_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out.parent, prefix=".mk-forge-") as temporary:
+        draft = Path(temporary) / out.name
+        result = _replace_pseudonyms(book, mapping, draft)
+        result.path = out
+        if recalculate:
+            draft = _recalculate(draft, result)
+        os.replace(draft, out)
+    return result
+
+
+def _replace_pseudonyms(book: Path, mapping: dict[str, str], out: Path) -> RestoreResult:
     workbook = openpyxl.load_workbook(book)
     try:
         result = RestoreResult(path=out)
@@ -128,29 +146,25 @@ def restore_numbers(
                 replaced += 1
             result.replaced[sheet] = replaced
         result.contracts = len(seen)
-        out.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(out)
     finally:
         workbook.close()
-
-    if recalculate:
-        _recalculate_in_place(out, result)
     return result
 
 
-def _recalculate_in_place(book: Path, result: RestoreResult) -> None:
-    """Посчитать числа в книге, оставив формулы живыми.
+def _recalculate(book: Path, result: RestoreResult) -> Path:
+    """Посчитать числа в книге, оставив формулы живыми. Возвращает, какой файл класть.
 
     LibreOffice пишет и формулы, и значения, поэтому книга остается моделью,
-    а не превращается в набор констант.
+    а не превращается в набор констант. Пересчет не удался — кладется книга
+    без значений, и отчет об этом говорит.
     """
     from mkforge.core.validate import RecalculationError, recalculate
 
-    with tempfile.TemporaryDirectory(prefix="mk-forge-") as temporary:
-        try:
-            computed = recalculate(book, Path(temporary))
-        except RecalculationError as error:
-            result.note = f"пересчет пропущен: {error}"
-            return
-        shutil.copyfile(computed, book)
+    try:
+        computed = recalculate(book, book.parent / "пересчет")
+    except RecalculationError as error:
+        result.note = f"пересчет пропущен: {error}"
+        return book
     result.recalculated = True
+    return computed

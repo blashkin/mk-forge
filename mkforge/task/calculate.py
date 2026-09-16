@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import csv
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -20,8 +21,8 @@ from typing import Any, Mapping
 
 from mkforge.campaigns.motivational import plan_from_config
 from mkforge.config import CampaignConfig, load_config
-from mkforge.core.loaders import load_inputs
-from mkforge.core.models import Inputs
+from mkforge.core.loaders import INPUT_FILES, check, load_inputs
+from mkforge.core.models import Inputs, ModelError
 from mkforge.task import charts
 from mkforge.task.fields import FIELDS, SECTIONS, values
 from mkforge.task.overrides import FieldError, apply
@@ -68,6 +69,62 @@ def open_workspace(
         inputs=load_inputs(inputs_dir),
         inputs_dir=inputs_dir,
         config=load_config(config_path),
+        config_path=config_path,
+        mapping_path=mapping_path,
+        work_dir=work_dir,
+        out_dir=out_dir,
+    )
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """Считать не по чему: данных нет или они не годятся.
+
+    Страница при этом открывается и предлагает загрузить выгрузку, а не отказывает:
+    в контейнере с перезапуском отказ означал бы процесс, который падает по кругу.
+    """
+
+    inputs_dir: Path
+    config_path: Path
+    missing: tuple[str, ...] = ()   # каких файлов нет
+    problems: tuple[str, ...] = ()  # что не так с теми, что есть
+
+    def payload(self) -> dict:
+        return {
+            "inputs_dir": str(self.inputs_dir),
+            "config_path": str(self.config_path),
+            "missing": list(self.missing),
+            "problems": list(self.problems),
+        }
+
+
+def open_page(
+    inputs_dir: Path,
+    config_path: Path,
+    mapping_path: Path,
+    work_dir: Path,
+    out_dir: Path,
+) -> Workspace | Waiting:
+    """Открыть задание, а если считать не по чему — сказать, чего не хватает.
+
+    Сломанный конфиг — по-прежнему отказ: его выбирает тот, кто запускает страницу,
+    а не тот, кто на нее смотрит.
+    """
+    config = load_config(config_path)
+    missing = tuple(name for name in INPUT_FILES if not (inputs_dir / name).exists())
+    if missing:
+        return Waiting(inputs_dir, config_path, missing=missing)
+    try:
+        inputs = load_inputs(inputs_dir)
+    except (ModelError, ValueError, csv.Error) as error:
+        return Waiting(inputs_dir, config_path, problems=(str(error),))
+    report = check(inputs)
+    if not report.ok:
+        return Waiting(inputs_dir, config_path, problems=tuple(report.errors))
+    return Workspace(
+        inputs=inputs,
+        inputs_dir=inputs_dir,
+        config=config,
         config_path=config_path,
         mapping_path=mapping_path,
         work_dir=work_dir,

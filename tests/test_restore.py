@@ -209,3 +209,36 @@ def test_deliverable_never_overwrites_its_source(tmp_path):
     target = deliverable_path(book, out)
     assert target != book
     assert target.name == "Книга с номерами.xlsx"
+
+
+def test_ready_book_appears_in_one_rename(built, mapping_path, tmp_path, monkeypatch):
+    """Пока книга пересчитывается, в готовых ее нет: прерванная сборка не оставит
+    там недосчитанную книгу, которую страница предложила бы скачать."""
+    ready = tmp_path / "готовые"
+    out = ready / "Книга.xlsx"
+
+    def recalculate(book, out_dir, profile_dir=None):
+        assert not out.exists(), "книга легла в готовые до пересчета"
+        assert book.parent.parent == ready, "черновик рядом с целью: переименование в пределах диска"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        computed = out_dir / book.name
+        computed.write_bytes(book.read_bytes())
+        return computed
+
+    monkeypatch.setattr("mkforge.core.validate.recalculate", recalculate)
+    result = restore_numbers(book=built, mapping_path=mapping_path, out=out)
+
+    assert result.recalculated and result.path == out
+    assert [path.name for path in ready.iterdir()] == ["Книга.xlsx"], "временная папка убрана"
+
+
+def test_interrupted_recalculation_leaves_nothing_ready(built, mapping_path, tmp_path, monkeypatch):
+    ready = tmp_path / "готовые"
+
+    def recalculate(book, out_dir, profile_dir=None):
+        raise KeyboardInterrupt  # страницу остановили посреди пересчета
+
+    monkeypatch.setattr("mkforge.core.validate.recalculate", recalculate)
+    with pytest.raises(KeyboardInterrupt):
+        restore_numbers(book=built, mapping_path=mapping_path, out=ready / "Книга.xlsx")
+    assert not list(ready.iterdir())

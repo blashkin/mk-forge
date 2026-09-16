@@ -1,16 +1,16 @@
 """Гайд «Установка на Mac» одним html-файлом — для пересылки в мессенджере.
 
-Текст живет в README, в разделе «Установка на Mac»: правда одна, файл
-пересобирается командой, руками его не правят. Ссылка на GitHub человеку, которому
-нужны три команды, выглядит чужеродно: вокруг раздела код и коммиты. Файл md
-в мессенджере открывается сырым текстом. Поэтому html: открывается в браузере
-как страница, у каждой команды кнопка «Копировать», внешних ресурсов нет —
-файл открывают без сети и без доверия к ней. Тот же файл CI публикует на GitHub
+Текст живет в docs/install-mac.md: правда одна, html пересобирается командой,
+руками его не правят. Ссылка на GitHub человеку, которому нужны три команды,
+выглядит чужеродно: вокруг файла код и коммиты. Файл md в мессенджере
+открывается сырым текстом. Поэтому html: открывается в браузере как страница,
+у каждой команды кнопка «Копировать», внешних ресурсов нет — файл открывают
+без сети и без доверия к ней. Тот же файл CI публикует на GitHub
 Pages (.github/workflows/pages.yml): вместо файла можно переслать ссылку.
 
-Разметки в разделе немного: заголовки, абзацы, нумерованные списки, команды
+Разметки в гайде немного: заголовки, абзацы, нумерованные списки, команды
 в ограждениях, ссылки, код и жирный в строке. Все остальное — отказ, а не
-молчаливый пропуск: иначе новая конструкция в README уехала бы получателю кривой.
+молчаливый пропуск: иначе новая конструкция в тексте уехала бы получателю кривой.
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ import re
 from pathlib import Path
 
 CODE_DIR = Path(__file__).resolve().parent
-# README лежит рядом с кодом в папке проекта; в образе его нет, и гайд там не собрать.
-README = CODE_DIR.parent / "README.md"
-SECTION = "Установка на Mac"
-OUT_NAME = f"{SECTION}.html"
+# Текст лежит рядом с кодом в папке проекта; в образе его нет, и гайд там не собрать.
+SOURCE = CODE_DIR.parent / "docs" / "install-mac.md"
+TITLE = "Установка на Mac"
+OUT_NAME = f"{TITLE}.html"
 COPY = "Копировать"
 COPIED = "Скопировано"
 
-_HEADING = re.compile(r"^(#{2,6}) (.+)$")
+_HEADING = re.compile(r"^(#{1,6}) (.+)$")
 _FENCE = re.compile(r"^```(\w*)$")
 _ITEM = re.compile(r"^\d+\. (.*)$")
 _URL = re.compile(r"https?://[^\s<]+")
@@ -36,26 +36,11 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 
 
 class GuideError(Exception):
-    """Раздел не найден или в нем разметка, которую гайд не умеет."""
-
-
-def extract_section(text: str, title: str = SECTION) -> list[str]:
-    """Строки раздела второго уровня с заголовком title, вместе с ним, до следующего."""
-    lines = text.split("\n")
-    try:
-        start = lines.index(f"## {title}")
-    except ValueError:
-        raise GuideError(f"в README нет раздела «## {title}»") from None
-    body = [lines[start]]
-    for line in lines[start + 1:]:
-        if line.startswith("## "):
-            break
-        body.append(line)
-    return body
+    """Текст не найден или в нем разметка, которую гайд не умеет."""
 
 
 def render_body(lines: list[str]) -> str:
-    """Тело страницы из строк раздела: заголовок раздела становится h1."""
+    """Тело страницы из строк гайда."""
     out: list[str] = []
     i = 0
     while i < len(lines):
@@ -65,7 +50,7 @@ def render_body(lines: list[str]) -> str:
             continue
         heading = _HEADING.match(line)
         if heading:
-            level = len(heading.group(1)) - 1
+            level = len(heading.group(1))
             out.append(f"<h{level}>{_inline(heading.group(2))}</h{level}>")
             i += 1
             continue
@@ -105,10 +90,9 @@ def render_body(lines: list[str]) -> str:
 
 def render_page(lines: list[str]) -> str:
     """Страница целиком: разметка, стили и кнопки копирования в одном файле."""
-    heading = _HEADING.match(lines[0]) if lines else None
-    if not heading or len(heading.group(1)) != 2:
-        raise GuideError("раздел должен начинаться с заголовка второго уровня")
-    title = html.escape(f"mk-forge: {heading.group(2)[0].lower()}{heading.group(2)[1:]}")
+    if not lines or lines[0] != f"# {TITLE}":
+        raise GuideError(f"гайд должен начинаться с заголовка «# {TITLE}»")
+    title = html.escape(f"mk-forge: {TITLE[0].lower()}{TITLE[1:]}")
     return (
         _PAGE.replace("@@TITLE@@", title)
         .replace("@@BODY@@", render_body(lines))
@@ -117,12 +101,12 @@ def render_page(lines: list[str]) -> str:
     )
 
 
-def build_guide(readme: Path = README, out: Path | None = None) -> Path:
-    """Собрать гайд из README в html-файл; вернуть, куда положен."""
-    if not readme.is_file():
-        raise GuideError(f"README не найден: {readme}")
-    out = out if out is not None else readme.parent / "out" / OUT_NAME
-    page = render_page(extract_section(readme.read_text(encoding="utf-8")))
+def build_guide(source: Path = SOURCE, out: Path | None = None) -> Path:
+    """Собрать гайд из текста в html-файл; вернуть, куда положен."""
+    if not source.is_file():
+        raise GuideError(f"текст гайда не найден: {source}")
+    out = out if out is not None else CODE_DIR.parent / "out" / OUT_NAME
+    page = render_page(source.read_text(encoding="utf-8").split("\n"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     return out

@@ -6,6 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import docx
 import openpyxl
 import pytest
 
@@ -362,3 +363,31 @@ def distributed_config_path(tmp_path: Path) -> Path:
     path.write_text(DISTRIBUTED_CONFIG, encoding="utf-8")
     return path
 
+
+def notice_document(path: Path, *, highway: bool = True, rows=None) -> Path:
+    """Синтетическое уведомление: таблица-пустышка и таблица шкалы, как в настоящем."""
+    document = docx.Document()
+
+    decoy = document.add_table(rows=2, cols=2)
+    decoy.rows[0].cells[0].text = "Руководителю"
+
+    products = ["АБ", "СУГ", "ДТ"] + (["ДТ на трассовых и автоматических АЗС"] if highway else [])
+    table = document.add_table(rows=2, cols=2 + len(products))
+    table.rows[0].cells[0].text = "Торговая Точка"
+    table.rows[0].cells[1].text = "Объем выборки НП (АБ, СУГ, ДТ) клиента"
+    table.rows[1].cells[0].text = "Торговая Точка"
+    table.rows[1].cells[1].text = "Объем выборки НП"
+    for offset, product in enumerate(products):
+        table.rows[1].cells[2 + offset].text = product
+
+    for bounds, rates in rows or [("0 – 5**", ("0,00", "0,00", "-3,50", "-4,50")),
+                                   ("5 - 10", ("0,00", "0,00", "-3,50", "-4,50")),
+                                   ("более 10", ("0,00", "0,00", "-1,00", "-2,00"))]:
+        row = table.add_row()
+        row.cells[0].text = "АЗС, РФ"
+        row.cells[1].text = bounds
+        for offset in range(len(products)):
+            row.cells[2 + offset].text = rates[offset]
+
+    document.save(str(path))
+    return path

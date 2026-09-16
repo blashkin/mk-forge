@@ -132,6 +132,32 @@ def open_page(
     )
 
 
+@dataclass(frozen=True)
+class Places:
+    """Откуда страница берет данные и куда кладет то, что из них вышло.
+
+    Страница открывается один раз, а данные под ней меняются загрузкой: чтобы
+    перечитать их, надо помнить, откуда их брали. Все пути уже от корня данных.
+    """
+
+    root: Path          # корень данных, в нем ключ обезличивания
+    raw_dir: Path       # куда ложатся загруженные файлы до обработки
+    inputs_dir: Path
+    config_path: Path
+    mapping_path: Path
+    work_dir: Path
+    out_dir: Path
+
+    def open(self) -> Workspace | Waiting:
+        return open_page(
+            inputs_dir=self.inputs_dir,
+            config_path=self.config_path,
+            mapping_path=self.mapping_path,
+            work_dir=self.work_dir,
+            out_dir=self.out_dir,
+        )
+
+
 def soffice_found() -> bool:
     """Есть ли LibreOffice. Сказать об этом надо при открытии страницы.
 

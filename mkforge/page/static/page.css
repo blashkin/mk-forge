@@ -216,3 +216,37 @@ details.section > summary {
 .books ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
 .books li { font-size: 13px; }
 .books a, .actions a { color: var(--accent); }
+
+.data h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.drop {
+  display: block;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.drop:hover, .drop.over { border-color: var(--accent); color: var(--ink); }
+.drop.busy { opacity: 0.5; pointer-events: none; }
+.drop input { display: block; margin-top: 8px; font-size: 12px; }
+.branches summary { cursor: pointer; font-size: 13px; font-weight: 600; padding: 4px 0; }
+.branches table.rows { margin: 6px 0 8px; }
+.branches td { font-size: 13px; vertical-align: top; }
+select {
+  width: 100%;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}

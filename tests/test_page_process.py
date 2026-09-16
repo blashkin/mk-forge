@@ -74,3 +74,50 @@ def test_page_without_config_refuses(home_in_tmp: Path, monkeypatch, capsys):
     monkeypatch.setenv("MK_FORGE_CONFIG", "  ")
     assert main(["page", "--no-open"]) == 1
     assert "MK_FORGE_CONFIG" in capsys.readouterr().err
+
+
+def test_upload_through_the_process_lands_in_the_root(home_in_tmp: Path, tmp_path: Path, export: Path):
+    """Места для загрузки считает командная строка: корень, data/raw, data/anon, таблица
+    соответствия — все от корня данных, как и остальное."""
+    from urllib.parse import quote
+
+    port = free_port()
+    address = f"http://127.0.0.1:{port}"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "mkforge.cli", "page", "--no-open", "--port", str(port)],
+        env={**os.environ, "MK_FORGE_CONFIG": "configs/example_distribution.yaml"},
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        wait_for_health(address, process)
+        request = urllib.request.Request(
+            address + "/api/upload", data=export.read_bytes(),
+            headers={"Content-Type": "application/octet-stream",
+                     "X-File-Name": quote("Выгрузка.xlsx", safe="")},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert json.loads(response.read())["ok"] is True
+        request = urllib.request.Request(
+            address + "/api/prepare", data=b"{}", headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            job = json.loads(response.read())["job"]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with urllib.request.urlopen(f"{address}/api/jobs/{job}", timeout=10) as response:
+                payload = json.loads(response.read())
+            if payload["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert payload["state"] == "done", payload["error"]
+    finally:
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=5)
+
+    assert (home_in_tmp / "data" / "anon" / "transactions.csv").exists()
+    assert (home_in_tmp / "data" / "contracts.mapping.json").exists()
+    assert list((home_in_tmp / "data" / "raw").iterdir()) == [], output
+    assert "Traceback" not in output

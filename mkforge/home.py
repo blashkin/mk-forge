@@ -44,6 +44,11 @@ class Home:
         return self.root / "data" / "anon"
 
     @property
+    def raw(self) -> Path:
+        """Сырые выгрузки. Загруженные через страницу лежат здесь только до обработки."""
+        return self.root / "data" / "raw"
+
+    @property
     def mapping(self) -> Path:
         return self.root / MAPPING_FILE
 

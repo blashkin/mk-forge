@@ -110,7 +110,7 @@ def _cmd_restore(args: argparse.Namespace, home: Home) -> int:
 def _cmd_page(args: argparse.Namespace, home: Home) -> int:
     """Поднять страницу акции. Без данных она открывается с приглашением загрузить выгрузку."""
     from mkforge.page.server import serve
-    from mkforge.task.calculate import open_page
+    from mkforge.task.calculate import Places
 
     # В контейнере аргументов не передают, акцию задает переменная. Пустая
     # переменная — не задана: конфиг по умолчанию не подставляется и здесь.
@@ -123,7 +123,9 @@ def _cmd_page(args: argparse.Namespace, home: Home) -> int:
         return 1
     for sample in seed_configs(home):
         print(f"в корне не было конфигов, положен образец {sample.name}")
-    state = open_page(
+    places = Places(
+        root=home.root,
+        raw_dir=home.raw,
         inputs_dir=_path(home, args.inputs, home.inputs),
         config_path=home.resolve(Path(config)),
         mapping_path=_path(home, args.mapping, home.mapping),
@@ -131,8 +133,8 @@ def _cmd_page(args: argparse.Namespace, home: Home) -> int:
         out_dir=home.out,
     )
     return serve(
-        state, out_dir=home.out, host=args.host, port=args.port,
-        open_browser=not args.no_open,
+        places.open(), out_dir=home.out, host=args.host, port=args.port,
+        open_browser=not args.no_open, places=places,
     )
 
 

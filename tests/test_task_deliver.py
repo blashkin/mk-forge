@@ -82,7 +82,7 @@ def test_failed_job_is_logged_without_the_message(capsys):
 
     job = wait(jobs, jobs.start(work).id, limit=5)
     output = capsys.readouterr().out
-    assert f"сборка {job.id} упала: ValueError" in output
+    assert f"сборка книги {job.id} упала: ValueError" in output
     assert "test_task_deliver.py" in output, "видно, где случилось"
     assert "Д-ABCDEF0123" not in output and "98765432" not in output
 
@@ -93,7 +93,7 @@ def test_interrupted_job_is_logged(capsys):
     job = jobs.start(lambda report: release.wait(5) and {"ok": True})
     try:
         assert jobs.interrupt() is job
-        assert f"сборка {job.id} прервана" in capsys.readouterr().out
+        assert f"сборка книги {job.id} прервана" in capsys.readouterr().out
     finally:
         release.set()
     wait(jobs, job.id, limit=5)

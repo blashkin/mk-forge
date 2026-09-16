@@ -15,6 +15,8 @@ const state = {
   shown: 0,            // номер последнего показанного
   answer: null,
   timer: null,
+  uploadLimit: 0,      // сколько байт сервер примет за один файл
+  dataNote: null,      // что сказать о данных после перерисовки страницы
 };
 
 const money = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
@@ -456,29 +458,32 @@ function buildBook(box, said, button) {
         button.disabled = false;
         return;
       }
-      poll(started.job, box, said, steps, button);
+      watch(started.job, steps, (job) => {
+        button.disabled = false;
+        if (job.state === 'failed') {
+          said.className = 'said broken';
+          said.textContent = job.error || 'сборка не дошла до конца';
+          return;
+        }
+        showDelivery(box, said, job.result);
+      });
     });
 }
 
-function poll(id, box, said, steps, button) {
-  fetch('/api/book/' + id)
+function watch(id, steps, finish) {
+  fetch('/api/jobs/' + id)
     .then((response) => response.json())
     .then((job) => {
       showSteps(steps, job.steps);
       if (job.state === 'running') {
         // Опрашиваем, а не держим соединение: пересчет идет минутами, и
         // сколько именно — заранее неизвестно, поэтому шаги, а не проценты.
-        window.setTimeout(() => poll(id, box, said, steps, button), 700);
+        window.setTimeout(() => watch(id, steps, finish), 700);
         return;
       }
-      button.disabled = false;
-      if (job.state === 'failed') {
-        said.className = 'said broken';
-        said.textContent = job.error || 'сборка не дошла до конца';
-        return;
-      }
-      showDelivery(box, said, job.result);
-    });
+      finish(job);
+    })
+    .catch(() => finish({ state: 'failed', error: 'сервер не ответил' }));
 }
 
 function showSteps(box, steps) {
@@ -580,6 +585,11 @@ function showWaiting(waiting) {
   document.getElementById('source').textContent =
     'конфиг ' + waiting.config_path + ' · данные ' + waiting.inputs_dir;
   document.getElementById('actions').hidden = true;
+  // Сюда можно прийти и с готовой страницы, когда новая выгрузка еще не сошлась
+  // с таблицей отделений: прежние числа посчитаны по другим данным.
+  document.getElementById('numbers').textContent = '';
+  document.getElementById('charts').textContent = '';
+  document.getElementById('result').classList.remove('stale');
 
   const form = document.getElementById('form');
   form.textContent = '';
@@ -587,7 +597,8 @@ function showWaiting(waiting) {
   box.appendChild(element('h2', { text: 'Загрузите выгрузку' }));
   box.appendChild(element('p', {
     text: 'Считать пока не по чему. Нужны выгрузка транзакций и договоров, '
-      + 'уведомление о СТП и таблица отделений.',
+      + 'уведомление о СТП и таблица отделений: выгрузку и уведомление загружают '
+      + 'в блоке «Данные» ниже, таблицу отделений заполняют там же после загрузки.',
   }));
   const list = (title, items, tone) => {
     if (!items.length) return;
@@ -601,6 +612,233 @@ function showWaiting(waiting) {
   form.appendChild(box);
 }
 
+/* --- данные: загрузка выгрузки и таблица отделений ------------------------ */
+
+function showData(payload) {
+  const box = document.getElementById('data');
+  box.hidden = !payload.upload;
+  box.textContent = '';
+  if (!payload.upload) return;
+  box.appendChild(element('h2', { text: 'Данные' }));
+
+  // В том руками не ходят: выгрузка попадает туда только отсюда.
+  const input = element('input', { type: 'file', multiple: '', accept: '.xlsx,.docx' });
+  const zone = element('label', { class: 'drop' });
+  zone.appendChild(element('span', {
+    text: 'Перетащите сюда выгрузку .xlsx и уведомление о СТП .docx — или нажмите, '
+      + 'чтобы выбрать. Уведомление можно не загружать: без него в книге не будет '
+      + 'трассовых ставок.',
+  }));
+  zone.appendChild(input);
+  box.appendChild(zone);
+
+  const said = element('p', { class: 'said' });
+  const steps = element('div', { class: 'steps' });
+  box.appendChild(said);
+  box.appendChild(steps);
+  if (state.dataNote) {
+    said.className = 'said ' + (state.dataNote.tone || '');
+    said.textContent = state.dataNote.text;
+  }
+
+  input.addEventListener('change', () => upload(Array.from(input.files), zone, said, steps));
+  zone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    zone.classList.add('over');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    zone.classList.remove('over');
+    upload(Array.from(event.dataTransfer.files), zone, said, steps);
+  });
+
+  showBranches(box);
+}
+
+function refuseFiles(files) {
+  const bad = files.filter((file) => !/\.(xlsx|docx)$/i.test(file.name));
+  if (bad.length) {
+    return '«' + bad[0].name + '» не подходит: нужна выгрузка .xlsx или уведомление .docx';
+  }
+  const exports = files.filter((file) => /\.xlsx$/i.test(file.name));
+  if (exports.length !== 1) {
+    return exports.length ? 'выгрузка одна — выберите один файл .xlsx'
+      : 'нужна выгрузка .xlsx; уведомление загружают вместе с ней';
+  }
+  if (files.filter((file) => /\.docx$/i.test(file.name)).length > 1) {
+    return 'уведомление одно — выберите один файл .docx';
+  }
+  const large = files.find((file) => state.uploadLimit && file.size > state.uploadLimit);
+  if (large) return '«' + large.name + '» слишком большой — это не похоже на выгрузку';
+  return null;
+}
+
+async function upload(files, zone, said, steps) {
+  if (!files.length) return;
+  steps.textContent = '';
+  state.dataNote = null;
+  const refusal = refuseFiles(files);
+  if (refusal) {
+    said.className = 'said broken';
+    said.textContent = refusal;
+    return;
+  }
+  zone.classList.add('busy');
+  const fail = (message) => {
+    zone.classList.remove('busy');
+    said.className = 'said broken';
+    said.textContent = message;
+  };
+
+  // По файлу на запрос, сырым телом. Имя идет кодированным: кириллица
+  // в заголовке как есть не проходит.
+  for (const file of files) {
+    said.className = 'said';
+    said.textContent = 'загружаю «' + file.name + '»';
+    let answer;
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+      answer = await response.json();
+    } catch (error) {
+      answer = { ok: false, message: 'сервер не ответил' };
+    }
+    if (!answer.ok) {
+      fail(answer.message || 'файл не принят');
+      return;
+    }
+  }
+
+  said.textContent = 'обрабатываю выгрузку';
+  let started;
+  try {
+    const response = await fetch('/api/prepare', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    started = await response.json();
+  } catch (error) {
+    started = { ok: false, message: 'сервер не ответил' };
+  }
+  if (!started.job) {
+    fail(started.message || 'обработка не запустилась');
+    return;
+  }
+  watch(started.job, steps, (job) => {
+    zone.classList.remove('busy');
+    if (job.state === 'failed') {
+      // Старые данные на месте: обработка заменяет их только после проверки.
+      fail((job.error || 'обработка не дошла до конца') + ' — прежние данные остались на месте');
+      return;
+    }
+    state.dataNote = { tone: 'done', text: loadedText(job.result) };
+    start();
+  });
+}
+
+function loadedText(result) {
+  const parts = [
+    'выгрузка загружена: договоров ' + money.format(result.contracts)
+      + ', транзакций ' + money.format(result.transactions)
+      + ', отделений ' + money.format(result.branches),
+    result.notice ? 'шкала СТП из уведомления' : 'уведомления нет, трассовых ставок в книге не будет',
+  ];
+  (result.warnings || []).forEach((warning) => parts.push(warning));
+  if (!result.ready) parts.push('считать пока нельзя — что не так, видно выше');
+  return parts.join('; ');
+}
+
+function showBranches(box) {
+  fetch('/api/branches')
+    .then((response) => response.json())
+    .then((described) => {
+      if (!described.ok) return;
+      const missing = described.missing.length;
+      const details = element('details', { class: 'branches' });
+      details.open = missing > 0;
+      details.appendChild(element('summary', {
+        text: 'Таблица отделений' + (missing ? ' — не заполнено: ' + missing : ''),
+      }));
+      details.appendChild(element('p', {
+        class: 'said',
+        text: 'К какому региону прогноза маржи относится каждое отделение из выгрузки. '
+          + 'По названию пары не подбираются: если не уверены, уточните, прежде чем сохранять.',
+      }));
+
+      const table = element('table', { class: 'rows' });
+      const head = element('tr');
+      head.appendChild(element('th', { text: 'Отделение' }));
+      head.appendChild(element('th', { text: 'Регион прогноза маржи' }));
+      table.appendChild(head);
+      const selects = {};
+      described.branches.forEach((row) => {
+        const line = element('tr', { 'data-branch': row.branch });
+        line.appendChild(element('td', { text: row.branch }));
+        const select = element('select');
+        select.appendChild(element('option', { value: '', text: '— не выбран —' }));
+        described.regions.forEach((region) => {
+          const option = element('option', { value: region, text: region });
+          option.selected = region === row.region;
+          select.appendChild(option);
+        });
+        selects[row.branch] = select;
+        const cell = element('td');
+        cell.appendChild(select);
+        if (row.region && !row.known) {
+          cell.appendChild(element('small', {
+            class: 'error', text: 'записан «' + row.region + '», а в прогнозе маржи такого региона нет',
+          }));
+        }
+        line.appendChild(cell);
+        table.appendChild(line);
+      });
+      details.appendChild(table);
+
+      const said = element('p', { class: 'said' });
+      const write = element('button', { type: 'button', text: 'Сохранить таблицу отделений' });
+      details.appendChild(write);
+      details.appendChild(said);
+      write.addEventListener('click', () => {
+        const pairs = {};
+        Object.entries(selects).forEach(([branch, select]) => { pairs[branch] = select.value; });
+        write.disabled = true;
+        fetch('/api/branches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pairs: pairs }),
+        })
+          .then((response) => response.json())
+          .then((answer) => {
+            write.disabled = false;
+            if (!answer.ok) {
+              said.className = 'said broken';
+              said.textContent = answer.message
+                || (answer.errors || []).map((e) => (e.branch ? e.branch + ': ' : '') + e.message).join('; ');
+              return;
+            }
+            state.dataNote = {
+              tone: answer.ready ? 'done' : '',
+              text: answer.ready ? 'таблица отделений сохранена, можно считать'
+                : 'таблица отделений сохранена, но считать пока нельзя — что не так, видно выше',
+            };
+            start();
+          })
+          .catch(() => {
+            write.disabled = false;
+            said.className = 'said broken';
+            said.textContent = 'сервер не ответил';
+          });
+      });
+      box.appendChild(details);
+    });
+}
+
 /* --- запуск ------------------------------------------------------------ */
 
 function start() {
@@ -608,6 +846,8 @@ function start() {
     .then((response) => response.json())
     .then((payload) => {
       showBooks();
+      state.uploadLimit = payload.upload_limit;
+      showData(payload);
       if (!payload.ready) {
         showWaiting(payload.waiting);
         return;

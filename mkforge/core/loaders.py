@@ -122,8 +122,8 @@ def _branch_regions(path: Path) -> dict[str, str]:
 
     Транзакции размечены отделениями, прогноз маржи — регионами, и связи между ними
     в выгрузке нет: в эталонной книге она жила внутри одной формулы. Поэтому таблицу
-    ведут руками и кладут рядом с обезличенными данными; `prepare` ее не создает
-    и не трогает. В git ее нет: это оргструктура, а не код.
+    ведут руками или заполняют формой на странице и кладут рядом с обезличенными данными;
+    `prepare` ее не создает и не трогает. В git ее нет: это оргструктура, а не код.
 
     Регион прогноза, на который не ссылается ни одно отделение, в расчет не попадает.
     """
@@ -140,14 +140,18 @@ def _branch_regions(path: Path) -> dict[str, str]:
     return table
 
 
-def load_inputs(directory: Path) -> Inputs:
-    """Прочитать обезличенные csv из каталога в типизированные модели."""
+def load_inputs(directory: Path, branches: bool = True) -> Inputs:
+    """Прочитать обезличенные csv из каталога в типизированные модели.
+
+    `branches=False` — без таблицы отделений: так проверяют свежую выгрузку, пока
+    таблица отделений к ней еще не заполнена.
+    """
     transactions = _build(Transaction, _rows(directory / TRANSACTIONS_FILE), directory / TRANSACTIONS_FILE)
     contracts = _build(Contract, _rows(directory / CONTRACTS_FILE), directory / CONTRACTS_FILE)
     brackets = _build(StpBracket, _rows(directory / SCALE_FILE), directory / SCALE_FILE)
     margin = _build(MarginForecast, _rows(directory / MARGIN_FILE), directory / MARGIN_FILE)
     economics = _economics(_rows(directory / ECONOMICS_FILE), directory / ECONOMICS_FILE)
-    branch_regions = _branch_regions(directory / BRANCHES_FILE)
+    branch_regions = _branch_regions(directory / BRANCHES_FILE) if branches else {}
 
     return Inputs(
         transactions=transactions,
@@ -159,8 +163,12 @@ def load_inputs(directory: Path) -> Inputs:
     )
 
 
-def check(inputs: Inputs) -> LoadReport:
-    """Сверить файлы между собой. Ловит то, что эталонная книга пропускала молча."""
+def check(inputs: Inputs, branches: bool = True) -> LoadReport:
+    """Сверить файлы между собой. Ловит то, что эталонная книга пропускала молча.
+
+    `branches=False` — сверить только саму выгрузку: отделения без региона и регионы
+    без прогноза маржи зависят от таблицы отделений, а ее заполняют после загрузки.
+    """
     report = LoadReport()
 
     in_pool = {c.contract for c in inputs.contracts}
@@ -189,20 +197,8 @@ def check(inputs: Inputs) -> LoadReport:
         report.warnings.append(
             f"{empty_branch} транзакций без отделения — их маржа не будет отнесена к региону"
         )
-    branches = inputs.branch_regions
-    unknown = {t.branch for t in inputs.transactions if t.branch} - set(branches)
-    if unknown:
-        report.errors.append(
-            f"отделения без региона маржи: {sorted(unknown)}; дополни {BRANCHES_FILE}"
-        )
-
-    regions_with_margin = {m.region for m in inputs.margin}
-    needed = {branches[b] for b in {t.branch for t in inputs.transactions if t.branch} & set(branches)}
-    without_forecast = needed - regions_with_margin
-    if without_forecast:
-        report.errors.append(
-            f"нет прогноза маржи для регионов: {sorted(without_forecast)}"
-        )
+    if branches:
+        _check_branches(inputs, report)
 
     products = {t.product for t in inputs.transactions if t.is_fuel}
     no_economics = products - set(inputs.economics)
@@ -210,3 +206,21 @@ def check(inputs: Inputs) -> LoadReport:
         report.errors.append(f"нет экономики для видов продукта: {sorted(no_economics)}")
 
     return report
+
+
+def _check_branches(inputs: Inputs, report: LoadReport) -> None:
+    """Таблица отделений против выгрузки: у каждого отделения регион, у региона прогноз."""
+    table = inputs.branch_regions
+    unknown = {t.branch for t in inputs.transactions if t.branch} - set(table)
+    if unknown:
+        report.errors.append(
+            f"отделения без региона маржи: {sorted(unknown)}; дополни таблицу отделений {BRANCHES_FILE}"
+        )
+
+    regions_with_margin = {m.region for m in inputs.margin}
+    needed = {table[b] for b in {t.branch for t in inputs.transactions if t.branch} & set(table)}
+    without_forecast = needed - regions_with_margin
+    if without_forecast:
+        report.errors.append(
+            f"нет прогноза маржи для регионов: {sorted(without_forecast)}"
+        )

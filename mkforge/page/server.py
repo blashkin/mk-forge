@@ -14,6 +14,10 @@
 Сервер многопоточный, потому что сборка книги идет минутами: пересчет в
 LibreOffice заложен с запасом в десять минут, и однопоточный сервер все это
 время не отдал бы даже стилей.
+
+Выгрузка приходит сырым телом, по файлу на запрос, а не multipart: модуль `cgi`
+из Python 3.13 удален, а свой разбор границ — шестьдесят строк ради ничего.
+Имя файла идет в заголовке кодированным.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import json
 import signal
 import socket
 import sys
+import threading
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,9 +38,22 @@ from urllib.parse import quote, unquote, urlparse
 from mkforge.config import ConfigError
 from mkforge.config_edit import EditError
 
+from mkforge.task import branches
 from mkforge.task.books import Book, find_book, ready_books
-from mkforge.task.calculate import Waiting, Workspace, calculate, form
+from mkforge.task.calculate import Places, Waiting, Workspace, calculate, form
 from mkforge.task.deliver import deliver
+from mkforge.task.intake import (
+    NO_EXPORT,
+    UPLOAD_LIMIT,
+    BadName,
+    Incomplete,
+    TooLarge,
+    UploadError,
+    Uploads,
+    WrongKind,
+    intake,
+    sweep,
+)
 from mkforge.task.jobs import Busy, Jobs
 from mkforge.task.persist import preview, save
 from mkforge.trace import log, where
@@ -54,6 +72,15 @@ PORT = 8765
 LOOPBACK = "127.0.0.1"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 NO_DATA = "данных для расчета нет — сначала загрузите выгрузку"
+NO_UPLOAD = "загрузка на этой странице недоступна"
+NAME_HEADER = "X-File-Name"
+# Отказ загрузке -> статус.
+UPLOAD_REFUSALS = {
+    BadName: HTTPStatus.BAD_REQUEST,
+    WrongKind: HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+    TooLarge: HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+    Incomplete: HTTPStatus.BAD_REQUEST,
+}
 
 
 class PageServer(ThreadingHTTPServer):
@@ -62,19 +89,33 @@ class PageServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, state: Workspace | Waiting, out_dir: Path | None = None):
+    def __init__(self, address, handler, state: Workspace | Waiting, out_dir: Path | None = None,
+                 places: Places | None = None):
         if isinstance(state, Workspace):
             out_dir = out_dir or state.out_dir
+        out_dir = out_dir or (places.out_dir if places else None)
         if out_dir is None:
             raise ValueError("без данных серверу нужно знать папку готовых книг")
         super().__init__(address, handler)
         self.state = state
         self.out_dir = out_dir
         self.jobs = Jobs()
+        # Без мест страница не знает, куда класть выгрузку и откуда перечитывать данные.
+        self.places = places
+        self.uploads = Uploads(places.raw_dir) if places else None
+        self._state_lock = threading.Lock()
+        if places:
+            sweep(places)
 
     @property
     def ready(self) -> bool:
         return isinstance(self.state, Workspace)
+
+    def reopen(self) -> Workspace | Waiting:
+        """Перечитать данные после загрузки или правки таблицы отделений."""
+        with self._state_lock:
+            self.state = self.places.open()
+            return self.state
 
 
 def _static(name: str) -> bytes:
@@ -132,9 +173,9 @@ class PageHandler(BaseHTTPRequestHandler):
             self._fail(HTTPStatus.BAD_REQUEST, "тело запроса не разобралось")
             return None
 
-    def _drain(self, length: int) -> None:
+    def _drain(self, length: int, limit: int = DRAIN_LIMIT) -> None:
         """Дочитать и выбросить тело, но не бесконечно."""
-        left = min(length, DRAIN_LIMIT)
+        left = min(length, limit)
         while left > 0:
             chunk = self.rfile.read(min(left, 64 * 1024))
             if not chunk:
@@ -216,10 +257,17 @@ class PageHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             state = self.server.state
-            if not self.server.ready:
-                self._json({"ready": False, "waiting": state.payload()})
+            upload = {"upload": self.server.places is not None, "upload_limit": UPLOAD_LIMIT}
+            if not isinstance(state, Workspace):
+                self._json({"ready": False, "waiting": state.payload(), **upload})
                 return
-            self._json({"ready": True, "form": form(state), "answer": calculate(state)})
+            self._json({"ready": True, "form": form(state), "answer": calculate(state), **upload})
+            return
+        if path == "/api/branches":
+            if self.server.places is None:
+                self._json({"ok": False, "message": NO_UPLOAD})
+                return
+            self._json(branches.describe(self.server.places.inputs_dir))
             return
         if path == "/api/books":
             self._json({"books": [book.payload() for book in ready_books(self.server.out_dir)]})
@@ -231,8 +279,8 @@ class PageHandler(BaseHTTPRequestHandler):
                 return
             self._book(book)
             return
-        if path.startswith("/api/book/"):
-            job = self.server.jobs.get(path[len("/api/book/"):])
+        if path.startswith("/api/jobs/"):
+            job = self.server.jobs.get(path[len("/api/jobs/"):])
             if job is None:
                 self._fail(HTTPStatus.NOT_FOUND, "такого задания нет")
                 return
@@ -246,9 +294,20 @@ class PageHandler(BaseHTTPRequestHandler):
             self._fail(HTTPStatus.FORBIDDEN, "страница открывается только на этой машине")
             return
         path = urlparse(self.path).path
+        if path == "/api/upload":
+            self._upload()
+            return
         body = self._body()
         if body is None:
             return
+
+        if path == "/api/prepare":
+            self._prepare()
+            return
+        if path == "/api/branches":
+            self._branches(body)
+            return
+
         if not self.server.ready:
             self._fail(HTTPStatus.CONFLICT, NO_DATA)
             return
@@ -293,6 +352,88 @@ class PageHandler(BaseHTTPRequestHandler):
 
         self._fail(HTTPStatus.NOT_FOUND, "нет такого маршрута")
 
+    def _upload(self) -> None:
+        """Принять один файл сырым телом. Обработка — отдельным запросом."""
+        length = self.headers.get("Content-Length")
+        if length is None or not length.isdigit():
+            # Без длины не понять, где кончается тело, и соединение не спасти.
+            self._fail(HTTPStatus.LENGTH_REQUIRED, "нужна длина тела")
+            return
+        length = int(length)
+        uploads = self.server.uploads
+        running = self.server.jobs.running()
+        refusal = (
+            NO_UPLOAD if uploads is None
+            else f"{running.name} уже идет" if running and running.state == "running"
+            else None
+        )
+        if refusal:
+            if uploads is not None:
+                uploads.discard()
+            self._drain(length, UPLOAD_LIMIT)
+            self._fail(HTTPStatus.CONFLICT, refusal)
+            return
+        consumed = 0
+
+        def read(size: int) -> bytes:
+            nonlocal consumed
+            chunk = self.rfile.read(size)
+            consumed += len(chunk)
+            return chunk
+
+        try:
+            received = uploads.receive(upload_name(self.headers.get(NAME_HEADER)), length, read)
+        except UploadError as error:
+            if not consumed:
+                self._drain(length, UPLOAD_LIMIT)  # отказ по заголовкам, тело еще в пути
+            self._fail(UPLOAD_REFUSALS[type(error)], str(error))
+            return
+        self._json({"ok": True, **received.payload()})
+
+    def _prepare(self) -> None:
+        """Обработать загруженное заданием: пересчета тут нет, но идет оно секунды."""
+        places, uploads = self.server.places, self.server.uploads
+        if uploads is None:
+            self._fail(HTTPStatus.CONFLICT, NO_UPLOAD)
+            return
+        # Загруженное забирается сразу: чем бы ни кончился этот запрос, сырые файлы
+        # в томе не остаются лежать до следующей загрузки.
+        batch = uploads.take()
+        if batch.export is None:
+            batch.remove()
+            self._fail(HTTPStatus.CONFLICT, NO_EXPORT)
+            return
+        try:
+            job = self.server.jobs.start(
+                lambda report: intake(places, batch, self.server.reopen, report),
+                name="обработка выгрузки",
+            )
+        except Busy as error:
+            batch.remove()
+            self._fail(HTTPStatus.CONFLICT, str(error))
+            return
+        self._json({"ok": True, "job": job.id}, HTTPStatus.ACCEPTED)
+
+    def _branches(self, body: dict) -> None:
+        places = self.server.places
+        if places is None:
+            self._fail(HTTPStatus.CONFLICT, NO_UPLOAD)
+            return
+        running = self.server.jobs.running()
+        if running and running.state == "running":
+            # Сборка держит данные в памяти, обработка их заменяет: таблица посреди
+            # любой из них разошлась бы с тем, что считается.
+            self._fail(HTTPStatus.CONFLICT, f"{running.name} уже идет")
+            return
+        pairs = body.get("pairs")
+        if not isinstance(pairs, dict):
+            self._fail(HTTPStatus.BAD_REQUEST, "нет пар «отделение — регион»")
+            return
+        answer = branches.save(places.inputs_dir, pairs)
+        if answer["ok"]:
+            answer["ready"] = isinstance(self.server.reopen(), Workspace)
+        self._json(answer)
+
     def _book(self, book: Book) -> None:
         self._send(
             HTTPStatus.OK,
@@ -300,6 +441,23 @@ class PageHandler(BaseHTTPRequestHandler):
             XLSX,
             headers={"Content-Disposition": attachment(book.name)},
         )
+
+
+def upload_name(header: str | None) -> str | None:
+    """Имя загруженного файла из заголовка.
+
+    Имя приходит кодированным: http.server читает заголовки в latin-1, и кириллица
+    как есть стала бы кракозябрами в имени, а не отказом. Поэтому некодированное
+    имя — отказ, а не догадка о кодировке.
+    """
+    if header is None:
+        return None
+    if not header.isascii():
+        raise BadName("имя файла должно приходить кодированным")
+    try:
+        return unquote(header, errors="strict")
+    except UnicodeDecodeError:
+        raise BadName("имя файла не раскодировалось") from None
 
 
 def attachment(name: str) -> str:
@@ -320,12 +478,13 @@ def serve(
     host: str = LOOPBACK,
     port: int = PORT,
     open_browser: bool = True,
+    places: Places | None = None,
 ) -> int:
     """Поднять страницу. Возвращает код для командной строки."""
     from mkforge.task.calculate import soffice_found
 
     try:
-        server = PageServer((host, port), PageHandler, state, out_dir)
+        server = PageServer((host, port), PageHandler, state, out_dir, places)
     except OSError as error:
         if error.errno == errno.EADDRINUSE:
             print(

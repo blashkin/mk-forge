@@ -2,7 +2,9 @@
 
 Одно задание за раз. Два параллельных прогона писали бы в один и тот же файл
 рабочей книги и запускали бы два пересчета сразу — а пересчет и в одиночку
-занимает столько, что запас в таймауте заложен в десять минут.
+занимает столько, что запас в таймауте заложен в десять минут. Обработка
+выгрузки стоит в той же очереди: книга, собранная посреди замены данных,
+взяла бы половину старых файлов и половину новых.
 
 Прогресс отдается шагами, а не процентами: сколько займет пересчет, мы не знаем,
 и рисовать полоску, которая врет, незачем.
@@ -45,6 +47,7 @@ class Job:
     """Что происходит с заданием прямо сейчас."""
 
     id: str
+    name: str = "сборка книги"  # что за задание — для отказа и журнала
     state: str = "running"  # running | done | failed
     started: float = field(default_factory=time.monotonic)
     steps: list[Step] = field(default_factory=list)
@@ -54,6 +57,7 @@ class Job:
     def payload(self) -> dict:
         return {
             "id": self.id,
+            "name": self.name,
             "state": self.state,
             "seconds": round(time.monotonic() - self.started, 1),
             "steps": [step.payload() for step in self.steps],
@@ -91,10 +95,12 @@ class Jobs:
         job = self.running()
         if job is None or job.state != "running":
             return None
-        log(f"сборка {job.id} прервана: страница остановлена")
+        log(f"{job.name} {job.id} прервана: страница остановлена")
         return job
 
-    def start(self, run: Callable[[Callable[[Step], None]], dict]) -> Job:
+    def start(
+        self, run: Callable[[Callable[[Step], None]], dict], name: str = "сборка книги"
+    ) -> Job:
         """Запустить задание в отдельном потоке.
 
         `run` получает функцию, которой сообщает о шагах. Шаг с тем же именем
@@ -103,8 +109,8 @@ class Jobs:
         """
         with self._lock:
             if self._running and self._jobs[self._running].state == "running":
-                raise Busy("сборка книги уже идет")
-            job = Job(id=uuid.uuid4().hex[:12])
+                raise Busy(f"{self._jobs[self._running].name} уже идет")
+            job = Job(id=uuid.uuid4().hex[:12], name=name)
             self._jobs[job.id] = job
             self._running = job.id
 
@@ -121,7 +127,7 @@ class Jobs:
                 result = run(report)
             except Exception as error:  # noqa: BLE001 — сообщаем все, чем бы ни было
                 # До смены состояния: кто ждет конца задания, застанет строку в журнале.
-                log(f"сборка {job.id} упала: {where(error)}")
+                log(f"{job.name} {job.id} упала: {where(error)}")
                 with self._lock:
                     job.state = "failed"
                     job.error = str(error) or error.__class__.__name__

@@ -154,7 +154,7 @@ def _cmd_doctor(args: argparse.Namespace, home: Home) -> int:
 
 
 def _cmd_guide(args: argparse.Namespace, home: Home) -> int:
-    """Собрать гайд «Установка на Mac» из README одним html-файлом для пересылки."""
+    """Собрать гайд «Установка на Mac» из docs/install-mac.md одним html-файлом для пересылки."""
     from mkforge.guide import OUT_NAME, GuideError, build_guide
 
     try:
@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
 
     guide = commands.add_parser(
         "guide",
-        help="собрать гайд «Установка на Mac» из README одним html-файлом для пересылки",
+        help="собрать гайд «Установка на Mac» из docs/install-mac.md одним html-файлом для пересылки",
     )
     guide.add_argument(
         "--out", type=Path, default=None,

@@ -1,14 +1,14 @@
 # Гайд «Установка на Mac» на GitHub Pages: https://blashkin.github.io/mk-forge/
 #
-# Гайд собирается командой mk-forge guide из раздела README, руками не правится.
-# Сборка идет в любой ветке, где менялись README или сборщик гайда: разметку,
+# Гайд собирается командой mk-forge guide из docs/install-mac.md, руками не правится.
+# Сборка идет в любой ветке, где менялись текст или сборщик гайда: разметку,
 # которую гайд не умеет, видно до мержа. Публикуется только main.
 name: Гайд
 
 on:
   push:
     paths:
-      - README.md
+      - docs/install-mac.md
       - mkforge/guide.py
       - .github/workflows/pages.yml
   workflow_dispatch:

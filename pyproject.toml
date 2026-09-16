@@ -1,0 +1,30 @@
+[project]
+name = "mk-forge"
+version = "0.1.0"
+description = "Генератор расчетных моделей маркетинговых кампаний топливной программы"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl>=3.1",
+    "pydantic>=2.7",
+    "python-docx>=1.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mk-forge = "mkforge.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mkforge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "libreoffice: требует установленного LibreOffice; без него пропускается",
+]

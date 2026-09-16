@@ -1,0 +1,33 @@
+# Тесты при каждом push, на синтетическом пуле: он строится в tests/conftest.py,
+# а data/ в git не попадает, так что реальных данных CI не видит.
+name: Тесты
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # У setup-uv с v8 нет мажорных тегов, только точные: @v10 не найдется.
+      # Версия uv та же, что на маке, — lock-файл пишется ею.
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+
+      # pytest лежит в необязательной группе dev: без --extra dev он не установится.
+      - run: uv sync --locked --extra dev
+
+      # LibreOffice на машине CI нет, пересчет проверяется в образе.
+      # Отсеиваем пометкой, а не полагаемся на пропуск внутри теста: так прогон
+      # не зависит от того, что окажется предустановлено на машине GitHub.
+      - run: uv run --no-sync pytest -m "not libreoffice"

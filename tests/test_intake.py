@@ -211,6 +211,22 @@ def test_notice_without_highway_rates_is_not_called_complete(places, export, tmp
     assert not any("с трассовыми ставками" in text for text in texts)
 
 
+def test_notice_without_highway_column_is_accepted(places, export, tmp_path):
+    """Уведомление вовсе без трассовой колонки: данные встают на место и страница их читает."""
+    rows = [("0 – 50", ("0,00", "0,00", "-3,50")), ("более 50", ("0,00", "0,00", "-1,00"))]
+    notice = notice_document(tmp_path / "без трассы.docx", highway=False, rows=rows)
+    steps = []
+    result = run(places, upload(places, export, notice), steps)
+
+    assert result["ok"] and result["notice"] is True
+    assert not any(places.raw_dir.iterdir()) and not leftovers(places)
+    texts = [step.text for step in steps]
+    assert any("трассовых ставок в нем нет" in text for text in texts)
+
+    write_branch_regions(places.inputs_dir)
+    assert isinstance(places.open(), Workspace)
+
+
 def test_intake_reopens_the_page(places, export):
     places.inputs_dir.mkdir(parents=True)
     write_branch_regions(places.inputs_dir)

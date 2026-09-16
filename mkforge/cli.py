@@ -153,6 +153,19 @@ def _cmd_doctor(args: argparse.Namespace, home: Home) -> int:
     return 0 if report.can_validate else 1
 
 
+def _cmd_guide(args: argparse.Namespace, home: Home) -> int:
+    """Собрать гайд «Установка на Mac» из README одним html-файлом для пересылки."""
+    from mkforge.guide import OUT_NAME, GuideError, build_guide
+
+    try:
+        out = build_guide(out=_path(home, args.out, home.out / OUT_NAME))
+    except GuideError as error:
+        print(f"гайд не собран: {error}", file=sys.stderr)
+        return 1
+    print(f"гайд собран: {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mk-forge",
@@ -297,6 +310,16 @@ def main(argv: list[str] | None = None) -> int:
         help="таблица соответствия псевдонимов (по умолчанию data/contracts.mapping.json)",
     )
     doctor.set_defaults(func=_cmd_doctor)
+
+    guide = commands.add_parser(
+        "guide",
+        help="собрать гайд «Установка на Mac» из README одним html-файлом для пересылки",
+    )
+    guide.add_argument(
+        "--out", type=Path, default=None,
+        help="куда сохранить файл (по умолчанию out/Установка на Mac.html)",
+    )
+    guide.set_defaults(func=_cmd_guide)
 
     args = parser.parse_args(argv)
     try:

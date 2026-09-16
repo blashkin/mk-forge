@@ -1,9 +1,13 @@
 # Тесты при каждом push, на синтетическом пуле: он строится в tests/conftest.py,
 # а data/ в git не попадает, так что реальных данных CI не видит.
+# Push, в котором только тексты (*.md, docs/), тесты не запускает: тесты их не читают.
 name: Тесты
 
 on:
   push:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
 
 permissions:
   contents: read

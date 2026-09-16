@@ -120,10 +120,30 @@ def test_first_prepare_creates_the_key_in_the_root(
 def test_doctor_prints_the_root(home: Path, tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setenv(SOFFICE_ENV, str(tmp_path / "нет-такого"))
     monkeypatch.chdir(folder(tmp_path, "где-то"))
-    assert main(["doctor"]) == 0
+    main(["doctor"])
     output = capsys.readouterr().out
     assert f"Корень данных:  {home.resolve()} (из переменной {HOME_ENV_VAR})" in output
     assert KEY not in output
+
+
+def test_doctor_fails_only_when_the_book_cannot_be_recalculated(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """На коде возврата стоит смоук образа. Пустой корень — без данных, ключа
+    и конфига — не провал; провал — только когда пересчитать книгу нечем."""
+    root = folder(tmp_path, "пустой корень")
+    monkeypatch.setenv(HOME_ENV_VAR, str(root))
+    monkeypatch.delenv(KEY_ENV_VAR, raising=False)
+
+    monkeypatch.setenv(SOFFICE_ENV, str(tmp_path / "нет-такого"))
+    assert main(["doctor"]) == 1
+
+    soffice = tmp_path / "soffice"
+    soffice.write_text("#!/bin/sh\necho LibreOffice 9.9.9\n", encoding="utf-8")
+    soffice.chmod(0o755)
+    monkeypatch.setenv(SOFFICE_ENV, str(soffice))
+    assert main(["doctor"]) == 0
+    assert "пересчет и проверка книги доступны" in capsys.readouterr().out
 
 
 def test_root_not_found_is_a_refusal(tmp_path: Path, monkeypatch, capsys):

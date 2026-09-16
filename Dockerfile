@@ -4,6 +4,10 @@
 #   docker compose -f compose.dev.yaml up --build    из рабочего дерева, см. compose.dev.yaml
 #   docker build --target test -t mk-forge:test .   тесты, в том числе с пересчетом
 #   docker run --rm mk-forge:test pytest -m libreoffice
+#
+# Для пользователя образ собирает и публикует в ghcr только CI, по тегу vX.Y.Z:
+# .github/workflows/image.yml. Собранный на месте образ под именем из compose.yaml
+# заслонил бы опубликованный.
 
 FROM python:3.12-slim-trixie AS base
 
@@ -45,6 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --extra dev
 COPY tests ./tests
 COPY Dockerfile compose.yaml compose.dev.yaml ./
+COPY .github/workflows/image.yml ./.github/workflows/
 
 FROM base AS runtime
 
@@ -57,6 +62,11 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin mkforge \
     && mkdir -p "$MK_FORGE_HOME" \
     && chown mkforge:mkforge "$MK_FORGE_HOME"
 USER mkforge
+
+# Версия выпуска: CI передает ее из тега, страница и doctor ее показывают.
+# Стоит последней, чтобы новая версия не сбивала кэш слоев выше.
+ARG MK_FORGE_VERSION=
+ENV MK_FORGE_VERSION=$MK_FORGE_VERSION
 
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

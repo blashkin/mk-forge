@@ -25,6 +25,11 @@ body {
 }
 
 .top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
   padding: 18px 24px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--paper);
@@ -32,6 +37,7 @@ body {
 
 .top h1 { margin: 0; font-size: 20px; font-weight: 600; }
 .source { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.version { margin: 0; color: var(--muted); font-size: 13px; white-space: nowrap; }
 
 .layout {
   display: grid;

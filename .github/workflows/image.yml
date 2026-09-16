@@ -1,0 +1,211 @@
+# Образ для пользователя: сборка под amd64 и arm64, смоук и публикация в ghcr.
+#
+# По тегу vX.Y.Z образ публикуется с метками X.Y.Z, X.Y и latest. При изменении
+# сборки в main и при запуске вручную обе архитектуры собираются и проверяются,
+# но в ghcr не уходит ничего. К пользователю код доходит только по тегу.
+#
+# Обе архитектуры собираются на родных машинах GitHub, эмуляции нет. Публикуется
+# только проверенное: смоук идет до отправки, а отправка берет слои из того же кэша.
+# Если одна архитектура упала после того, как другая отправилась, в ghcr останется
+# образ без метки; ни одна метка на него не укажет.
+name: Образ
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/blashkin/mk-forge
+  # Публикация — только push тега. Запуск вручную с тегом в поле ref не публикует.
+  PUBLISH: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+
+defaults:
+  run:
+    # Явный bash включает pipefail: код doctor не теряется за tee.
+    shell: bash
+
+jobs:
+  build:
+    name: Сборка ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # v1.2.3 → 1.2.3. Тег другой формы не публикуется. Без тега версии нет,
+      # и страница покажет «сборка на месте».
+      - name: Версия из тега
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$PUBLISH" != true ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "тег $REF_NAME не вида vX.Y.Z — не публикуем" >&2
+            exit 1
+          fi
+          echo "value=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Метки те же, что у манифеста ниже: иначе в метке версии стоял бы v1.2.3.
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Сборка для проверки
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          platforms: linux/${{ matrix.arch }}
+          build-args: MK_FORGE_VERSION=${{ steps.version.outputs.value }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          load: true
+          tags: mk-forge:smoke
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # doctor падает, только если книгу пересчитать нечем. Пустой корень —
+      # без данных, ключа и конфига — строки отчета, а не провал.
+      - name: Смоук — doctor в образе
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          docker run --rm mk-forge:smoke doctor | tee "$RUNNER_TEMP/doctor.txt"
+          grep -Fx "  + Версия:  ${VERSION:-сборка на месте}" "$RUNNER_TEMP/doctor.txt"
+
+      # Уезжает к пользователю образ, а не контекст сборки, поэтому смотрится образ.
+      # От root: иначе часть папок не читается. Шаблон python-docx — часть библиотеки.
+      - name: В образе нет данных
+        run: |
+          docker run --rm -i --user 0 --entrypoint sh mk-forge:smoke -s <<'CHECK'
+          set -eu
+          found=$(find / -xdev \( -path /proc -o -path /sys -o -path /dev \) -prune -o \
+            \( -name .env -o -name '.env.*' -o -name '*.mapping.json' \
+               -o -iname '*.xlsx' -o -iname '*.xlsm' -o -iname '*.xlsb' -o -iname '*.xls' \
+               -o -iname '*.docx' -o -iname '*.doc' -o -iname '*.csv' \
+               -o -path '*/data/raw' -o -path '*/data/anon' \) -print \
+            | grep -v '/site-packages/docx/templates/default\.docx$' || true)
+          configs=$(ls -A /app/configs | grep -v '^example_.*\.yaml$' || true)
+          home=$(ls -A /srv/mk-forge)
+          echo "данные, ключи, выгрузки: ${found:-нет}"
+          echo "конфиги не из образцов: ${configs:-нет}"
+          echo "в корне данных: ${home:-пусто}"
+          [ -z "$found$configs$home" ]
+          CHECK
+
+      - name: Вход в ghcr
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Отправка по дайджесту
+        if: env.PUBLISH == 'true'
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          platforms: linux/${{ matrix.arch }}
+          build-args: MK_FORGE_VERSION=${{ steps.version.outputs.value }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+      - name: Дайджест для манифеста
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Манифест и метки
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Метки: полная версия, минорная и latest. Откат у пользователя — полная
+      # версия в MK_FORGE_TAG, см. compose.yaml.
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Манифест на две архитектуры
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: Что опубликовано
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"

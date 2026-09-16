@@ -93,6 +93,7 @@ def test_state_gives_the_form_and_the_first_answer(address):
     assert payload["form"]["fields"]
     assert payload["answer"]["ok"] is True
     assert payload["answer"]["plan"]["pool_size"] > 0
+    assert payload["version"], "по версии на странице видно, какой образ запущен"
 
 
 def test_calculate_returns_numbers(address):

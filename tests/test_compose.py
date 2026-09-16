@@ -58,3 +58,11 @@ def test_user_container_restarts_and_dev_container_does_not():
     """Разработческий контейнер не должен держать порт, пока страница из исходников."""
     assert all(s.get("restart") == "unless-stopped" for s in services("compose.yaml").values())
     assert all("restart" not in s for s in services("compose.dev.yaml").values())
+
+
+def test_user_image_version_is_a_variable_and_matches_the_published_name():
+    """Откат — смена тега в переменной, а не правка файла. Имя образа в compose
+    обязано совпадать с тем, под которым CI публикует: иначе pull тянул бы не то."""
+    image = services("compose.yaml")["page"]["image"]
+    published = yaml.safe_load(Path(".github/workflows/image.yml").read_text(encoding="utf-8"))
+    assert image == f"{published['env']['IMAGE']}:${{MK_FORGE_TAG:-latest}}"

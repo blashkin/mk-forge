@@ -1,6 +1,7 @@
 [project]
 name = "mk-forge"
-version = "0.1.0"
+# Версия выпуска — тег vX.Y.Z, в образ ее передает CI; здесь она не ведется.
+version = "0.0.0"
 description = "Генератор расчетных моделей маркетинговых кампаний топливной программы"
 requires-python = ">=3.12"
 dependencies = [

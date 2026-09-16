@@ -139,16 +139,18 @@ def _cmd_page(args: argparse.Namespace, home: Home) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace, home: Home) -> int:
-    """Показать, что найдено в окружении и чего не хватает."""
-    print(
-        diagnose(
-            home=home,
-            inputs_dir=_path(home, args.inputs, home.inputs),
-            config_path=_path(home, args.config, home.configs / "example_levels.yaml"),
-            mapping_path=_path(home, args.mapping, home.mapping),
-        ).report()
+    """Показать, что найдено в окружении и чего не хватает.
+
+    Ненулевой код — только когда книгу пересчитать нечем: на нем стоит смоук образа.
+    """
+    report = diagnose(
+        home=home,
+        inputs_dir=_path(home, args.inputs, home.inputs),
+        config_path=_path(home, args.config, home.configs / "example_levels.yaml"),
+        mapping_path=_path(home, args.mapping, home.mapping),
     )
-    return 0
+    print(report.report())
+    return 0 if report.can_validate else 1
 
 
 def main(argv: list[str] | None = None) -> int:

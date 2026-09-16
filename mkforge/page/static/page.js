@@ -846,6 +846,9 @@ function start() {
     .then((response) => response.json())
     .then((payload) => {
       showBooks();
+      // Версию задает тег при сборке образа; по ней видно, какой образ запущен.
+      document.getElementById('version').textContent = /^\d/.test(payload.version)
+        ? 'версия ' + payload.version : payload.version;
       state.uploadLimit = payload.upload_limit;
       showData(payload);
       if (!payload.ready) {

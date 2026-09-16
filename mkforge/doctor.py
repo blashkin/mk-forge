@@ -3,6 +3,10 @@
 Нужна, чтобы не выяснять состояние по падению другой команды. Ничего не меняет
 и ничего не спрашивает — только смотрит и рассказывает.
 
+Код возврата ненулевой, только когда пересчитать книгу нечем: на этом стоит смоук
+образа. Нет данных, ключа или конфига — строка отчета, а не провал: пустой том
+у нового пользователя не болезнь.
+
 Ключ обезличивания не печатается: сообщается лишь, задан он или нет.
 """
 
@@ -13,6 +17,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mkforge import release
 from mkforge.config import ConfigError, load_config
 from mkforge.core.anonymize import KEY_ENV_VAR, existing_mappings, key_origin
 from mkforge.core.loaders import (
@@ -87,9 +92,11 @@ def _check_soffice() -> Check:
         soffice = find_soffice()
     except RecalculationError as error:
         return Check("LibreOffice", ok=False, detail=str(error))
-    version = _soffice_version(soffice)
-    detail = f"{soffice}" + (f", {version}" if version else "")
-    return Check("LibreOffice", ok=True, detail=detail)
+    # Найденный, но не отвечающий LibreOffice книгу тоже не пересчитает:
+    # в образе это значит, что пакет встал не целиком.
+    if not (version := _soffice_version(soffice)):
+        return Check("LibreOffice", ok=False, detail=f"{soffice} не отвечает на --version")
+    return Check("LibreOffice", ok=True, detail=f"{soffice}, {version}")
 
 
 def _check_inputs(inputs_dir: Path) -> list[Check]:
@@ -150,6 +157,7 @@ def diagnose(
 ) -> DoctorReport:
     """Собрать отчет об окружении."""
     report = DoctorReport()
+    report.checks.append(Check("Версия", ok=True, detail=release()))
     report.checks.append(
         Check("Корень данных", ok=True, detail=f"{home.root} ({home.source})")
     )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from mkforge import LOCAL_BUILD, VERSION_ENV_VAR
 from mkforge.core.anonymize import KEY_ENV_VAR
 from mkforge.core.validate import SOFFICE_ENV
 from mkforge.doctor import diagnose
@@ -14,6 +15,14 @@ from mkforge.home import Home
 
 def names(report) -> dict[str, bool]:
     return {check.name: check.ok for check in report.checks}
+
+
+def fake_soffice(folder: Path, answer: str) -> Path:
+    """Исполняемый файл вместо LibreOffice: печатает answer на --version."""
+    path = folder / "soffice"
+    path.write_text(f"#!/bin/sh\nprintf '%s' '{answer}'\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 def test_full_environment_is_reported(anon_dir: Path, config_path: Path, tmp_path: Path):
@@ -179,3 +188,51 @@ def test_empty_key_line_is_not_a_key(anon_dir: Path, config_path: Path, tmp_path
         home=Home(tmp_path, "проверка"),
     )
     assert not names(report)["Ключ обезличивания"]
+
+
+def test_answering_libreoffice_enables_validation(
+    anon_dir: Path, config_path: Path, tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv(SOFFICE_ENV, str(fake_soffice(tmp_path, "LibreOffice 9.9.9")))
+    report = diagnose(
+        inputs_dir=anon_dir,
+        config_path=config_path,
+        mapping_path=tmp_path / "mapping.json",
+        home=Home(tmp_path, "проверка"),
+    )
+    assert report.can_validate
+    assert "LibreOffice 9.9.9" in report.report()
+
+
+def test_silent_libreoffice_blocks_validation(
+    anon_dir: Path, config_path: Path, tmp_path: Path, monkeypatch
+):
+    """Найденный, но молчащий LibreOffice книгу не пересчитает: смоук образа обязан упасть."""
+    monkeypatch.setenv(SOFFICE_ENV, str(fake_soffice(tmp_path, "")))
+    report = diagnose(
+        inputs_dir=anon_dir,
+        config_path=config_path,
+        mapping_path=tmp_path / "mapping.json",
+        home=Home(tmp_path, "проверка"),
+    )
+    assert not names(report)["LibreOffice"]
+    assert not report.can_validate
+    assert "не отвечает" in report.report()
+
+
+@pytest.mark.parametrize(("value", "shown"), [("0.1.0", "0.1.0"), ("", LOCAL_BUILD), (None, LOCAL_BUILD)])
+def test_version_is_reported(
+    anon_dir: Path, config_path: Path, tmp_path: Path, monkeypatch, value, shown
+):
+    """Версию задает тег при сборке образа; без нее — сборка на месте."""
+    if value is None:
+        monkeypatch.delenv(VERSION_ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(VERSION_ENV_VAR, value)
+    report = diagnose(
+        inputs_dir=anon_dir,
+        config_path=config_path,
+        mapping_path=tmp_path / "mapping.json",
+        home=Home(tmp_path, "проверка"),
+    )
+    assert f"Версия:  {shown}" in report.report()

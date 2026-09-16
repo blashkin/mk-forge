@@ -35,6 +35,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
+from mkforge import release
 from mkforge.config import ConfigError
 from mkforge.config_edit import EditError
 
@@ -257,11 +258,15 @@ class PageHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             state = self.server.state
-            upload = {"upload": self.server.places is not None, "upload_limit": UPLOAD_LIMIT}
+            common = {
+                "upload": self.server.places is not None,
+                "upload_limit": UPLOAD_LIMIT,
+                "version": release(),
+            }
             if not isinstance(state, Workspace):
-                self._json({"ready": False, "waiting": state.payload(), **upload})
+                self._json({"ready": False, "waiting": state.payload(), **common})
                 return
-            self._json({"ready": True, "form": form(state), "answer": calculate(state), **upload})
+            self._json({"ready": True, "form": form(state), "answer": calculate(state), **common})
             return
         if path == "/api/branches":
             if self.server.places is None:

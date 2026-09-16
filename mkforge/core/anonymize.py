@@ -25,6 +25,8 @@ from pathlib import Path
 
 import openpyxl
 
+from mkforge.home import MAPPING_FILE
+
 TRANSACTIONS_SHEET = "Транзакции участников"
 CONTRACTS_SHEET = "База участников"
 
@@ -59,6 +61,10 @@ class ExportError(Exception):
     """Выгрузка не той формы: нет листа или нет обязательной колонки."""
 
 
+class MissingKeyError(Exception):
+    """Таблица соответствия есть, а ключа, которым она построена, нет."""
+
+
 @dataclass
 class Result:
     """Что получилось, чтобы было видно: ничего не потеряно и ничего не утекло."""
@@ -85,22 +91,54 @@ def normalize_header(header: object) -> str:
     return re.sub(r"\s+", " ", str(header or "")).strip()
 
 
-def hmac_key(root: Path) -> bytes:
-    """Ключ HMAC из окружения или из .env. Если его нет — создать и записать.
-
-    Ключ никогда не покидает машину: .env в gitignore. Потеря ключа означает,
-    что старые псевдонимы больше не совпадут с новыми, поэтому .env стоит
-    забэкапить туда, где хранятся пароли.
-    """
+def _key_text(root: Path) -> tuple[str, str] | None:
+    """Ключ как текст и откуда он взят: из переменной или из .env в корне данных."""
     if value := os.environ.get(KEY_ENV_VAR):
-        return bytes.fromhex(value)
-
+        return value, f"из переменной {KEY_ENV_VAR}"
     env = root / ".env"
     if env.exists():
         for line in env.read_text(encoding="utf-8").splitlines():
             name, _, value = line.partition("=")
             if name.strip() == KEY_ENV_VAR and value.strip():
-                return bytes.fromhex(value.strip())
+                return value.strip(), f"в {env.name} корня данных"
+    return None
+
+
+def existing_mappings(root: Path, mapping_path: Path) -> list[Path]:
+    """Таблицы соответствия, которые уже есть: указанная и та, что в корне данных.
+
+    Смотрим обе: prepare в новую таблицу при потерянном ключе иначе молча
+    создал бы новый, и старая таблица в корне разошлась бы с ним.
+    """
+    return [path for path in dict.fromkeys((mapping_path, root / MAPPING_FILE)) if path.exists()]
+
+
+def key_origin(root: Path) -> str | None:
+    """Откуда возьмется ключ. Сам ключ не возвращается — его нельзя печатать."""
+    found = _key_text(root)
+    return found[1] if found else None
+
+
+def hmac_key(root: Path, mapping_path: Path) -> bytes:
+    """Ключ HMAC из окружения или из .env в корне данных. Если его нет — создать.
+
+    Ключ никогда не покидает машину: .env в gitignore. Потеря ключа означает,
+    что старые псевдонимы больше не совпадут с новыми, поэтому .env стоит
+    забэкапить туда, где хранятся пароли.
+
+    Новый ключ не создается, если таблица соответствия уже есть: значит, ключ
+    был, и новый молча развел бы псевдонимы свежих данных со старыми книгами.
+    """
+    if found := _key_text(root):
+        return bytes.fromhex(found[0])
+
+    env = root / ".env"
+    if existing := existing_mappings(root, mapping_path):
+        raise MissingKeyError(
+            f"таблица соответствия {existing[0]} есть, а ключа нет ни в переменной "
+            f"{KEY_ENV_VAR}, ни в {env}. С новым ключом псевдонимы не совпали бы "
+            f"со старыми, поэтому новый не создаю: верни прежний ключ в {env}"
+        )
 
     new_key = secrets.token_hex(32)
     with env.open("a", encoding="utf-8") as f:
@@ -162,11 +200,13 @@ def anonymize(
     source: Path,
     out_dir: Path,
     mapping_path: Path,
-    root: Path | None = None,
+    root: Path,
 ) -> Result:
-    """Прочитать сырую выгрузку, заменить номера договоров, записать data/anon."""
-    root = root or Path.cwd()
-    key = hmac_key(root)
+    """Прочитать сырую выгрузку, заменить номера договоров, записать data/anon.
+
+    `root` — корень данных: в нем лежит .env с ключом. Текущая папка не подставляется.
+    """
+    key = hmac_key(root, mapping_path)
 
     wb = openpyxl.load_workbook(source, read_only=True, data_only=True)
     try:

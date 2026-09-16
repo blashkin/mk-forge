@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mkforge.config import ConfigError, load_config
-from mkforge.core.anonymize import KEY_ENV_VAR
+from mkforge.core.anonymize import KEY_ENV_VAR, existing_mappings, key_origin
 from mkforge.core.loaders import (
     BRANCHES_FILE,
     CONTRACTS_FILE,
@@ -24,6 +24,7 @@ from mkforge.core.loaders import (
     TRANSACTIONS_FILE,
 )
 from mkforge.core.validate import SOFFICE_ENV, RecalculationError, find_soffice
+from mkforge.home import Home
 
 VERSION_TIMEOUT = 60
 
@@ -113,19 +114,21 @@ def _check_inputs(inputs_dir: Path) -> list[Check]:
     return [Check("Обезличенные данные", ok=not missing, detail=detail), table]
 
 
-def _check_key(root: Path) -> Check:
+def _check_key(root: Path, mapping_path: Path) -> Check:
     """Задан ли ключ обезличивания. Сам ключ не печатается."""
-    import os
-
-    if os.environ.get(KEY_ENV_VAR):
-        return Check("Ключ обезличивания", ok=True, detail=f"из переменной {KEY_ENV_VAR}")
-    env = root / ".env"
-    if env.exists() and KEY_ENV_VAR in env.read_text(encoding="utf-8"):
-        return Check("Ключ обезличивания", ok=True, detail=f"в {env.name}, не печатается")
+    if origin := key_origin(root):
+        return Check("Ключ обезличивания", ok=True, detail=f"{origin}, не печатается")
+    if existing_mappings(root, mapping_path):
+        return Check(
+            "Ключ обезличивания",
+            ok=False,
+            detail=f"нет ни в {KEY_ENV_VAR}, ни в {root / '.env'}, а таблица соответствия "
+            f"есть — prepare откажет: верни прежний ключ",
+        )
     return Check(
         "Ключ обезличивания",
         ok=False,
-        detail="не задан — создастся при первом mk-forge prepare",
+        detail=f"не задан — создастся в {root / '.env'} при первом mk-forge prepare",
     )
 
 
@@ -143,11 +146,13 @@ def _check_config(path: Path) -> Check:
 
 
 def diagnose(
-    inputs_dir: Path, config_path: Path, mapping_path: Path, root: Path | None = None
+    home: Home, inputs_dir: Path, config_path: Path, mapping_path: Path
 ) -> DoctorReport:
     """Собрать отчет об окружении."""
-    root = root or Path.cwd()
     report = DoctorReport()
+    report.checks.append(
+        Check("Корень данных", ok=True, detail=f"{home.root} ({home.source})")
+    )
     report.checks.append(
         Check("Python", ok=True, detail=".".join(str(p) for p in sys.version_info[:3]))
     )
@@ -164,6 +169,6 @@ def diagnose(
             ),
         )
     )
-    report.checks.append(_check_key(root))
+    report.checks.append(_check_key(home.root, mapping_path))
     report.checks.append(_check_config(config_path))
     return report

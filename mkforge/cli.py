@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from mkforge.core.anonymize import ExportError, anonymize
+from mkforge.core.anonymize import ExportError, MissingKeyError, anonymize
 from mkforge.core.extract import ParametersError, extract
 from mkforge.config_edit import EditError
 from mkforge.core.loaders import check, load_inputs
@@ -16,74 +16,87 @@ from mkforge.config import ConfigError, load_config
 from mkforge.core.validate import RecalculationError, validate_path
 from mkforge.core.verify import verify_all
 from mkforge.doctor import diagnose
+from mkforge.home import Home, HomeError, find_home
 from mkforge.renderers.xlsx import build
 from mkforge.restore import deliverable_path, restore_numbers
 
 
-# Готовые книги лежат в out/, рабочие копии на псевдонимах — уровнем ниже.
-# Так в out/ остается только то, что отдают, и убирать за собой не нужно.
-OUT_DIR = Path("out")
-WORK_DIR = OUT_DIR / "рабочие"
+ROOT_NOTE = (
+    "Относительные пути считаются от корня данных: переменная MK_FORGE_HOME, "
+    "без нее — папка проекта. Текущая папка роли не играет."
+)
 
 
-def _cmd_prepare(args: argparse.Namespace) -> int:
+def _path(home: Home, value: Path | None, default: Path | None = None) -> Path | None:
+    """Путь из аргумента от корня данных; не задан — путь по умолчанию."""
+    return home.resolve(value) if value is not None else default
+
+
+def _cmd_prepare(args: argparse.Namespace, home: Home) -> int:
     """Превратить сырую книгу в безопасный набор входных данных в data/anon."""
+    source = home.resolve(args.source)
+    out = _path(home, args.out, home.inputs)
     anonymized = anonymize(
-        source=args.source,
-        out_dir=args.out,
-        mapping_path=args.mapping,
+        source=source,
+        out_dir=out,
+        mapping_path=_path(home, args.mapping, home.mapping),
+        root=home.root,
     )
     print(anonymized.report())
-    extracted = extract(source=args.source, out_dir=args.out, notice=args.notice)
+    extracted = extract(source=source, out_dir=out, notice=_path(home, args.notice))
     print(extracted.report())
     print()
-    print(check(load_inputs(args.out)).report())
+    print(check(load_inputs(out)).report())
     return 0
 
 
-def _cmd_verify(args: argparse.Namespace) -> int:
+def _cmd_verify(args: argparse.Namespace, home: Home) -> int:
     """Сверить ядро с эталонной книгой по каждому договору."""
     report = verify_all(
-        book=args.book,
-        inputs_dir=args.inputs,
-        mapping_path=args.mapping,
-        config=load_config(args.config),
+        book=home.resolve(args.book),
+        inputs_dir=_path(home, args.inputs, home.inputs),
+        mapping_path=_path(home, args.mapping, home.mapping),
+        config=load_config(home.resolve(args.config)),
     )
     print(report.report())
     return 0 if report.ok else 1
 
 
-def _cmd_build(args: argparse.Namespace) -> int:
+def _cmd_build(args: argparse.Namespace, home: Home) -> int:
     """Собрать книгу по конфигу акции."""
-    config = load_config(args.config)
-    inputs = load_inputs(args.inputs)
+    config = load_config(home.resolve(args.config))
+    inputs = load_inputs(_path(home, args.inputs, home.inputs))
     report = check(inputs)
     if not report.ok:
         print(report.report(), file=sys.stderr)
         return 1
-    print(build(inputs=inputs, config=config, path=args.out).report())
+    out = _path(home, args.out, home.work / "книга.xlsx")
+    print(build(inputs=inputs, config=config, path=out).report())
     return 0
 
 
-def _cmd_validate(args: argparse.Namespace) -> int:
+def _cmd_validate(args: argparse.Namespace, home: Home) -> int:
     """Пересчитать книгу и сверить ее с расчетным ядром."""
     report = validate_path(
-        book=args.book,
-        inputs_dir=args.inputs,
-        config_path=args.config,
-        work_dir=args.work,
+        book=home.resolve(args.book),
+        inputs_dir=_path(home, args.inputs, home.inputs),
+        config_path=home.resolve(args.config),
+        work_dir=_path(home, args.work, home.work / "пересчет"),
     )
     print(report.report())
     return 0 if report.ok else 1
 
 
-def _cmd_restore(args: argparse.Namespace) -> int:
+def _cmd_restore(args: argparse.Namespace, home: Home) -> int:
     """Вернуть настоящие номера договоров в собранную книгу."""
-    out = args.out or deliverable_path(args.book, OUT_DIR)
+    # Готовые книги лежат в out/, рабочие копии на псевдонимах — уровнем ниже.
+    # Так в out/ остается только то, что отдают, и убирать за собой не нужно.
+    book = home.resolve(args.book)
+    out = _path(home, args.out, deliverable_path(book, home.out))
     print(
         restore_numbers(
-            book=args.book,
-            mapping_path=args.mapping,
+            book=book,
+            mapping_path=_path(home, args.mapping, home.mapping),
             out=out,
             recalculate=not args.no_recalc,
         ).report()
@@ -91,31 +104,35 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_page(args: argparse.Namespace) -> int:
+def _cmd_page(args: argparse.Namespace, home: Home) -> int:
     """Поднять локальную страницу акции."""
     from mkforge.page.server import serve
     from mkforge.task.calculate import open_workspace
 
-    inputs = load_inputs(args.inputs)
+    inputs_dir = _path(home, args.inputs, home.inputs)
+    inputs = load_inputs(inputs_dir)
     report = check(inputs)
     if not report.ok:
         print(report.report(), file=sys.stderr)
         return 1
     state = open_workspace(
-        inputs_dir=args.inputs,
-        config_path=args.config,
-        mapping_path=args.mapping,
-        work_dir=args.work,
-        out_dir=OUT_DIR,
+        inputs_dir=inputs_dir,
+        config_path=home.resolve(args.config),
+        mapping_path=_path(home, args.mapping, home.mapping),
+        work_dir=_path(home, args.work, home.work),
+        out_dir=home.out,
     )
     return serve(state, port=args.port, open_browser=not args.no_open)
 
 
-def _cmd_doctor(args: argparse.Namespace) -> int:
+def _cmd_doctor(args: argparse.Namespace, home: Home) -> int:
     """Показать, что найдено в окружении и чего не хватает."""
     print(
         diagnose(
-            inputs_dir=args.inputs, config_path=args.config, mapping_path=args.mapping
+            home=home,
+            inputs_dir=_path(home, args.inputs, home.inputs),
+            config_path=_path(home, args.config, home.configs / "example_levels.yaml"),
+            mapping_path=_path(home, args.mapping, home.mapping),
         ).report()
     )
     return 0
@@ -125,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mk-forge",
         description="Генератор расчетных моделей маркетинговых кампаний",
+        epilog=ROOT_NOTE,
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -137,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     prepare.add_argument("source", type=Path, help="путь к xlsx из data/raw")
     prepare.add_argument(
-        "--out", type=Path, default=Path("data/anon"), help="куда положить результат"
+        "--out", type=Path, default=None, help="куда положить результат (по умолчанию data/anon)"
     )
     prepare.add_argument(
         "--notice", type=Path, default=None,
@@ -146,8 +164,9 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument(
         "--mapping",
         type=Path,
-        default=Path("data/contracts.mapping.json"),
-        help="куда положить таблицу соответствия (остается локально)",
+        default=None,
+        help="куда положить таблицу соответствия (по умолчанию data/contracts.mapping.json, "
+        "остается локально)",
     )
     prepare.set_defaults(func=_cmd_prepare)
 
@@ -157,11 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     verify.add_argument("book", type=Path, help="эталонная книга из reference/")
     verify.add_argument(
-        "--inputs", type=Path, default=Path("data/anon"), help="каталог обезличенных данных"
+        "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
     verify.add_argument(
-        "--mapping", type=Path, default=Path("data/contracts.mapping.json"),
-        help="таблица соответствия псевдонимов",
+        "--mapping", type=Path, default=None,
+        help="таблица соответствия псевдонимов (по умолчанию data/contracts.mapping.json)",
     )
     verify.add_argument(
         "--config", type=Path, required=True, help="конфиг акции, по которому считать"
@@ -171,11 +190,11 @@ def main(argv: list[str] | None = None) -> int:
     assemble = commands.add_parser("build", help="собрать книгу Excel по конфигу акции")
     assemble.add_argument("config", type=Path, help="конфиг акции из configs/")
     assemble.add_argument(
-        "--inputs", type=Path, default=Path("data/anon"), help="каталог обезличенных данных"
+        "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
     assemble.add_argument(
-        "--out", type=Path, default=WORK_DIR / "книга.xlsx",
-        help="куда сохранить книгу (по умолчанию рабочая папка)"
+        "--out", type=Path, default=None,
+        help="куда сохранить книгу (по умолчанию out/рабочие/книга.xlsx)"
     )
     assemble.set_defaults(func=_cmd_build)
 
@@ -189,11 +208,11 @@ def main(argv: list[str] | None = None) -> int:
         help="конфиг акции, по которому собиралась книга",
     )
     check_book.add_argument(
-        "--inputs", type=Path, default=Path("data/anon"), help="каталог обезличенных данных"
+        "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
     check_book.add_argument(
-        "--work", type=Path, default=WORK_DIR / "пересчет",
-        help="куда положить пересчитанную копию",
+        "--work", type=Path, default=None,
+        help="куда положить пересчитанную копию (по умолчанию out/рабочие/пересчет)",
     )
     check_book.set_defaults(func=_cmd_validate)
 
@@ -203,8 +222,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     real.add_argument("book", type=Path, help="собранная книга из out/")
     real.add_argument(
-        "--mapping", type=Path, default=Path("data/contracts.mapping.json"),
-        help="таблица соответствия псевдонимов (остается локально)",
+        "--mapping", type=Path, default=None,
+        help="таблица соответствия псевдонимов (по умолчанию data/contracts.mapping.json, "
+        "остается локально)",
     )
     real.add_argument(
         "--out", type=Path, default=None,
@@ -225,15 +245,17 @@ def main(argv: list[str] | None = None) -> int:
         "config", type=Path, help="конфиг акции с распределением глубины скидки"
     )
     page.add_argument(
-        "--inputs", type=Path, default=Path("data/anon"), help="каталог обезличенных данных"
+        "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
     page.add_argument("--port", type=int, default=8765, help="порт на 127.0.0.1")
     page.add_argument(
-        "--work", type=Path, default=WORK_DIR, help="куда собирать книги"
+        "--work", type=Path, default=None,
+        help="куда собирать книги (по умолчанию out/рабочие)"
     )
     page.add_argument(
-        "--mapping", type=Path, default=Path("data/contracts.mapping.json"),
-        help="таблица соответствия псевдонимов (остается локально)",
+        "--mapping", type=Path, default=None,
+        help="таблица соответствия псевдонимов (по умолчанию data/contracts.mapping.json, "
+        "остается локально)",
     )
     page.add_argument(
         "--no-open", action="store_true", help="не открывать браузер самому"
@@ -244,21 +266,29 @@ def main(argv: list[str] | None = None) -> int:
         "doctor", help="проверить окружение: LibreOffice, данные, ключ, конфиг"
     )
     doctor.add_argument(
-        "--inputs", type=Path, default=Path("data/anon"), help="каталог обезличенных данных"
+        "--inputs", type=Path, default=None, help="каталог обезличенных данных (по умолчанию data/anon)"
     )
     doctor.add_argument(
-        "--config", type=Path, default=Path("configs/example_levels.yaml"),
-        help="конфиг акции (по умолчанию пример из репозитория)",
+        "--config", type=Path, default=None,
+        help="конфиг акции (по умолчанию пример configs/example_levels.yaml)",
     )
     doctor.add_argument(
-        "--mapping", type=Path, default=Path("data/contracts.mapping.json"),
-        help="таблица соответствия псевдонимов",
+        "--mapping", type=Path, default=None,
+        help="таблица соответствия псевдонимов (по умолчанию data/contracts.mapping.json)",
     )
     doctor.set_defaults(func=_cmd_doctor)
 
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        home = find_home()
+    except HomeError as error:
+        print(f"корень данных не найден: {error}", file=sys.stderr)
+        return 1
+    try:
+        return args.func(args, home)
+    except MissingKeyError as error:
+        print(f"ключ обезличивания не найден: {error}", file=sys.stderr)
+        return 1
     except (
         ExportError, ParametersError, ModelError, ConfigError,
         RecalculationError, NoticeError, EditError,

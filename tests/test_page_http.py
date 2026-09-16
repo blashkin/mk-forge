@@ -186,3 +186,26 @@ def test_config_save_refuses_bad_input(address):
     assert status == 200
     assert answer["ok"] is False
     assert answer["errors"][0]["field"] == "distribution"
+
+
+def test_route_failure_is_logged_without_data(address, monkeypatch, capsys):
+    """Сбой маршрута — строка в стандартный вывод и отказ 500, но без сообщения ошибки:
+    в сообщениях бывают псевдонимы и числа пула."""
+    def broken(state, overrides=None):
+        raise ValueError("Д-ABCDEF0123 выручка 98765432")
+
+    monkeypatch.setattr("mkforge.page.server.calculate", broken)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        post(address, "/api/calculate", {"overrides": {"share_without": 0.2}})
+    assert error.value.code == 500
+    assert json.loads(error.value.read())["ok"] is False
+
+    output = capsys.readouterr().out
+    assert "сбой POST /api/calculate: ValueError" in output
+    assert "test_page_http.py" in output, "видно, где случилось"
+    for secret in ("Д-ABCDEF0123", "98765432", "share_without", "0.2"):
+        assert secret not in output
+
+    # Сервер жив и отвечает дальше.
+    status, _, _ = get(address, "/")
+    assert status == 200

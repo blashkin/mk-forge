@@ -189,6 +189,14 @@ def key_from_env(monkeypatch) -> str:
     return key
 
 
+@pytest.fixture(autouse=True)
+def home_in_tmp(monkeypatch, tmp_path_factory) -> Path:
+    """Корень данных тестов — временная папка: настоящие data/, out/ и .env не трогаются."""
+    home = tmp_path_factory.mktemp("корень")
+    monkeypatch.setenv("MK_FORGE_HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def anon_dir(export: Path, tmp_path: Path) -> Path:
     """Обезличенные csv из синтетической книги — вход для загрузчика."""

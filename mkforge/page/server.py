@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import socket
+import traceback
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
+from pathlib import Path
 from urllib.parse import urlparse
 
 from mkforge.config import ConfigError
@@ -135,9 +137,38 @@ class PageHandler(BaseHTTPRequestHandler):
         """Одна строка на запрос, без тел: в телах числа по реальному пулу."""
         print(f"  {self.command} {self.path}")
 
+    def _guarded(self, route) -> None:
+        """Сбой маршрута — строка в стандартный вывод и внятный отказ странице.
+
+        Без этого исключение уходит в stderr вместе с сообщением, а в сообщениях
+        бывают псевдонимы и числа пула; страница же получает оборванное соединение.
+        В строку идут только тип ошибки и где она случилась: сообщение, тело
+        запроса и строка запроса в журнал не попадают.
+        """
+        try:
+            route()
+        except ConnectionError:
+            self.close_connection = True  # страница ушла, отвечать некому
+        except Exception as error:  # noqa: BLE001 — журналу нужен любой сбой
+            print(
+                f"  сбой {self.command} {urlparse(self.path).path}: {_where(error)}",
+                flush=True,
+            )
+            try:
+                self._fail(HTTPStatus.INTERNAL_SERVER_ERROR,
+                           "на сервере сбой, подробности в журнале")
+            except OSError:
+                self.close_connection = True
+
     # --- маршруты -------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 — имя из базового класса
+        self._guarded(self._get)
+
+    def do_POST(self) -> None:  # noqa: N802 — имя из базового класса
+        self._guarded(self._post)
+
+    def _get(self) -> None:
         if not self._local():
             self._fail(HTTPStatus.FORBIDDEN, "страница открывается только на этой машине")
             return
@@ -168,7 +199,7 @@ class PageHandler(BaseHTTPRequestHandler):
 
         self._fail(HTTPStatus.NOT_FOUND, "нет такого маршрута")
 
-    def do_POST(self) -> None:  # noqa: N802 — имя из базового класса
+    def _post(self) -> None:
         if not self._local():
             self._fail(HTTPStatus.FORBIDDEN, "страница открывается только на этой машине")
             return
@@ -216,6 +247,15 @@ class PageHandler(BaseHTTPRequestHandler):
             return
 
         self._fail(HTTPStatus.NOT_FOUND, "нет такого маршрута")
+
+
+def _where(error: BaseException) -> str:
+    """Тип ошибки и путь по коду, без сообщения: в сообщениях бывают данные."""
+    frames = " → ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}"
+        for frame in traceback.extract_tb(error.__traceback__)
+    )
+    return f"{type(error).__name__} ({frames})"
 
 
 def _bind(state: Workspace, port: int) -> PageServer:
